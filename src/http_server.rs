@@ -1,6 +1,5 @@
 use crate::config::Config;
 use crate::statistics::Statistics;
-use crate::time_stats::STAT_ITEM::{DAY, HOUR, MINUTE, MONTH, SECOND};
 use crate::version::VERSION;
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use log::debug;

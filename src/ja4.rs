@@ -1,4 +1,4 @@
-use crate::ssl_helper::{join_u16, join_u8, truncated_hash_hex};
+use crate::ssl_helper::{filter_grease, join_u16, join_u8, truncated_hash_hex};
 use crate::TLS_Protocol;
 use tracing::debug;
 
@@ -73,19 +73,24 @@ pub fn compute_ja4_client_fingerprint(
         0x0304 => ja4_string.push_str("13"),
         0x0302 => ja4_string.push_str("11"),
         0x0301 => ja4_string.push_str("10"),
-        _ => {}
+        _ => ja4_string.push_str("00"),
     }
     if sni_present {
         ja4_string.push('d');
     } else {
         ja4_string.push('i');
     }
-    ja4_string.push_str(&format!("{}", ciphers.len()));
-    ja4_string.push_str(&format!("{}", exts.len()));
+    ja4_string.push_str(&format!("{:02}", ciphers.len()));
+    ja4_string.push_str(&format!("{:02}", exts.len()));
     if alpn.is_empty() {
         ja4_string.push_str("00")
     } else {
-        ja4_string.push_str(&first_and_last(&alpn[0]));
+        let alpn_val = first_and_last(&alpn[0]);
+        if alpn_val.is_empty() {
+            ja4_string.push_str("00");
+        } else {
+            ja4_string.push_str(&alpn_val);
+        }
     }
 
     let mut ciphers = ciphers.to_vec();
@@ -96,6 +101,7 @@ pub fn compute_ja4_client_fingerprint(
 
     let cipher_list_str = ciphers
         .iter()
+        .filter(|v| **v & 0x0f0f != 0x0a0a)
         .map(|v| format!("{:04x}", v))
         .collect::<Vec<_>>()
         .join(",");
@@ -103,12 +109,14 @@ pub fn compute_ja4_client_fingerprint(
 
     let ext_list_str = exts
         .iter()
-        .filter(|v| **v != 0)
+        // ignore SNI  and ALPN and Grease
+        .filter(|v| **v != 0 && **v != 0x0010 && **v & 0x0f0f != 0x0a0a)
         .map(|v| format!("{:04x}", v))
         .collect::<Vec<_>>()
         .join(",");
     let sig_list_str = sigs
         .iter()
+        .filter(|v| **v & 0x0f0f != 0x0a0a)
         .map(|v| format!("{:04x}", v))
         .collect::<Vec<_>>()
         .join(",");
@@ -158,7 +166,7 @@ pub fn compute_ja4_server_fingerprint(
 
     let ext_list_str = exts
         .iter()
-        .filter(|v| **v != 0)
+        .filter(|v| **v != 0 && **v & 0x0f0f != 0x0a0a)
         .map(|v| format!("{:04x}", v))
         .collect::<Vec<_>>()
         .join(",");
@@ -181,10 +189,10 @@ pub fn compute_ja3_client_fingerprint(
     let ja3_string = format!(
         "{},{},{},{},{}",
         client_hello_version,
-        join_u16(&cipher_list),
-        join_u16(&ext_list),
-        join_u16(&group_list),
-        join_u8(&point_list),
+        join_u16(&filter_grease(cipher_list)),
+        join_u16(&filter_grease(ext_list)),
+        join_u16(&filter_grease(group_list)),
+        join_u8(point_list),
     );
     debug!("JA3C: {}", ja3_string);
     let ja3_hash = format!("{:x}", md5::compute(ja3_string.as_bytes()));
@@ -200,7 +208,7 @@ pub fn compute_ja3_server_fingerprint(
         "{},{},{}",
         server_hello_version,
         cipher,
-        join_u16(&ext_list),
+        join_u16(&filter_grease(ext_list)),
     );
     debug!("JA3S: {}", ja3s_string);
     let ja3s_hash = format!("{:x}", md5::compute(ja3s_string.as_bytes()));

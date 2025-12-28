@@ -1,4 +1,3 @@
-
 #![allow(non_camel_case_types)]
 extern crate core;
 
@@ -26,9 +25,9 @@ use crate::version::VERSION;
 use chrono::{DateTime, Utc};
 use clap::Parser;
 use config::parse_config;
+use daemonize_me::{Daemon, Group, User};
 use futures::executor::block_on;
 use mysql_connection::Mysql_connection;
-use daemonize_me::{Daemon, Group, User};
 use packet_info::Packet_info;
 use parking_lot::Mutex;
 use pcap::{Activated, Active, Capture, Linktype};
@@ -122,7 +121,8 @@ fn parse_tls_packet(
     if let Some(a_packet) = packet_queue.pop_front() {
         match a_packet {
             Some((mut packet, ts)) => {
-                let result = parse_eth(&mut packet, packet_info_list, config, ts, &mut stats.lock());
+                let result =
+                    parse_eth(&mut packet, packet_info_list, config, ts, &mut stats.lock());
                 match result {
                     Err(error) => debug!("{error:?}"),
                     Ok(()) => {}
@@ -271,8 +271,10 @@ fn connect_database(config: &Config) -> Option<Mysql_connection> {
 }
 
 fn is_valid_session(packet_info: &Packet_info) -> bool {
-    let has_packets = packet_info.tls_client.packet_count > 0 || packet_info.tls_server.packet_count > 0;
-    let has_tls_data = packet_info.tls_server.version != 0 || !packet_info.tls_client.versions.is_empty();
+    let has_packets =
+        packet_info.tls_client.packet_count > 0 || packet_info.tls_server.packet_count > 0;
+    let has_tls_data =
+        packet_info.tls_server.version != 0 || !packet_info.tls_client.versions.is_empty();
 
     if !has_packets || !has_tls_data {
         return false;
@@ -291,7 +293,10 @@ fn export_session(
     database_conn: &mut Option<Mysql_connection>,
 ) {
     if !is_valid_session(&packet_info) {
-        debug!("Session {:?} is invalid or incomplete, skipping export", key);
+        debug!(
+            "Session {:?} is invalid or incomplete, skipping export",
+            key
+        );
         return;
     }
 
@@ -555,7 +560,6 @@ fn main() {
     };
 
     if config.daemon {
-
         debug!("Daemonising");
 
         let daemon = Daemon::new()

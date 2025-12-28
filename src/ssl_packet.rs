@@ -9,8 +9,7 @@ use crate::ja4::{
 };
 use crate::packet_info::{Packet_Info_List, Packet_info};
 use crate::ssl_helper::{
-    parse_ssl_str, ssl_parse_slice, ssl_read_u16, ssl_read_u24, ssl_read_u32, 
-    ssl_read_u8,
+    parse_ssl_str, ssl_parse_slice, ssl_read_u16, ssl_read_u24, ssl_read_u32, ssl_read_u8,
 };
 use crate::statistics::Statistics;
 use crate::tls_cipher_suites::TlsCipherSuite;
@@ -23,8 +22,12 @@ use crate::tls_extension_types::TlsExtensionType::{
 pub use crate::tls_groups::TlsSupportedGroup;
 use crate::tls_signature_hash_algorithms::TlsSignatureScheme;
 use crate::TLS_Protocol;
+use aes::Aes128;
+use aes_gcm::aead::Aead;
+use aes_gcm::{AeadInPlace, Aes128Gcm};
 use chrono::{DateTime, Utc};
-use std::cmp::min;
+use cipher::generic_array::GenericArray;
+use cipher::{BlockEncrypt, KeyInit};
 use std::collections::hash_map::Entry;
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -953,7 +956,7 @@ fn parse_udp(
     ts: DateTime<Utc>,
     source_ip: &IpAddr,
     dest_ip: &IpAddr,
-    _statistics: &mut Statistics,
+    statistics: &mut Statistics,
 ) -> Result<(), Box<dyn Error>> {
     if packet.len() < 8 {
         return Err(Parse_error::new(ParseErrorType::Invalid_UDP_Header, "packet len < 8").into());
@@ -967,7 +970,7 @@ fn parse_udp(
     ////packet_info.set_source_port(sp);
     //    packet_info.set_data_len(u32::from(len) - 8);
 
-    // TODO need to handle QUIC and DTLS
+    // TODO need to handle DTLS
     if config.ports.contains(&dp) || config.ports.contains(&sp) {
         //parse_ssl(packet, packet_info_list, ts, source_ip, dest_ip, sp, dp)
         let mut data = ssl_parse_slice(packet, 8..)?.to_vec();
@@ -980,6 +983,7 @@ fn parse_udp(
             dest_ip,
             sp,
             dp,
+            statistics,
         )
     } else {
         Err(Parse_error::new(
@@ -995,9 +999,10 @@ const QUIC_V1_SALT: [u8; 20] = [
     0xcc, 0xbb, 0x7f, 0x0a,
 ];
 
-pub fn hkdf_expand_label(secret: &[u8], label: &str, length: usize) -> Vec<u8> {
-    let hk = Hkdf::<Sha256>::from_prk(secret).expect("PRK length should be valid for SHA256");
-
+fn hkdf_expand_label(secret: &[u8], label: &str, length: usize) -> Result<Vec<u8>, Parse_error> {
+    let hk = Hkdf::<Sha256>::from_prk(secret).map_err(|_| {
+        Parse_error::new(ParseErrorType::Invalid_TLS_Packet, "Invalid PRK length for SHA256")
+    })?;
     // 1. Build the "tls13 " prefixed label
     let full_label = format!("tls13 {}", label);
 
@@ -1010,32 +1015,12 @@ pub fn hkdf_expand_label(secret: &[u8], label: &str, length: usize) -> Vec<u8> {
     info.push(0); // Context length (always 0)
 
     let mut okm = vec![0u8; length];
-    hk.expand(&info, &mut okm).expect("HKDF expansion failed");
-
-    okm
+    hk.expand(&info, &mut okm).map_err(|_| {
+        Parse_error::new(ParseErrorType::Invalid_TLS_Packet, "HKDF expansion failed")
+    })?;
+    Ok(okm)
 }
-fn _hkdf_expand_label(secret: &[u8], label: &str, context: &[u8], length: usize) -> Vec<u8> {
-    let label_prefix = b"tls13 ";
-    let mut hkdf_label = Vec::new();
 
-    // length as u16 in big-endian format
-    hkdf_label.extend_from_slice(&(length as u16).to_be_bytes());
-
-    // label_length as u8 + label with prefix
-    let full_label = [label_prefix, label.as_bytes()].concat();
-    hkdf_label.push(full_label.len() as u8);
-    hkdf_label.extend_from_slice(&full_label);
-
-    // context_length as u8 + context
-    hkdf_label.push(context.len() as u8);
-    hkdf_label.extend_from_slice(context);
-
-    let mut output = vec![0u8; length];
-    let hk = Hkdf::<Sha256>::new(None, secret);
-    hk.expand(&hkdf_label, &mut output).unwrap();
-
-    output
-}
 
 pub fn calculate_initial_secret(salt: &[u8], cid: &[u8]) -> Vec<u8> {
     // HKDF-Extract returns (PseudoRandomKey, HkdfObj)
@@ -1045,13 +1030,13 @@ pub fn calculate_initial_secret(salt: &[u8], cid: &[u8]) -> Vec<u8> {
     // Convert the output to a Vec for easy handling
     prk.to_vec()
 }
-fn derive_initial_secret(dcid: &[u8]) -> (Vec<u8>, Vec<u8>) {
+fn derive_initial_secret(dcid: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>>  {
     let initial_secret = calculate_initial_secret(&QUIC_V1_SALT, &dcid);
 
-    let client_secret = hkdf_expand_label(&initial_secret, "client in", 32);
-    let server_secret = hkdf_expand_label(&initial_secret, "server in", 32);
+    let client_secret = hkdf_expand_label(&initial_secret, "client in", 32)?;
+    let server_secret = hkdf_expand_label(&initial_secret, "server in", 32)?;
 
-    (client_secret, server_secret)
+    Ok((client_secret, server_secret))
 }
 
 #[cfg(test)]
@@ -1078,7 +1063,7 @@ mod tests {
         // Initial secret test vectors from RFC 9001, Appendix A.1
         let dcid = hex::decode("8394c8f03e515708").unwrap();
 
-        let (client_secret, server_secret) = derive_initial_secret(&dcid);
+        let (client_secret, server_secret) = derive_initial_secret(&dcid).unwrap();
 
         // Expected Initial Secret (extracted intermediate value from RFC)
         // initial_secret = HKDF-Extract(salt, dcid)
@@ -1095,110 +1080,73 @@ mod tests {
         assert_eq!(hex::encode(server_secret), expected_server);
     }
 
-    //#[test]
-    /*fn test_rfc9001_appendix_a_packet_protection() {
-        // Using Client Secret from above to test key derivation (A.2)
+    #[test]
+    fn test_rfc9001_appendix_a2_client_initial_keys() {
+        // RFC 9001 Appendix A.2 - Client Initial packet protection keys
         let client_secret =
-            hex::decode("c00cf151ca5be075ed0ebfb5c803ad3f5196a0bb2ed13875691459a499801295")
+            hex::decode("c00cf151ca5be075ed0ebfb5c80323c42d6b7db67881289af4008f1f6c357aea")
                 .unwrap();
-        let keys = derive_packet_keys(&client_secret);
+        let keys = derive_packet_keys(&client_secret).unwrap();
 
-        // key: 1f369613dd819381c13e10469096294d
-        assert_eq!(hex::encode(keys.key), "1f369613dd819381c13e10469096294d");
-        // iv:  9990519142f36f97693c0667
-        assert_eq!(hex::encode(keys.iv), "9990519142f36f97693c0667");
-        // hp:  9f50449e04a0e810283a1e9933adedd2
+        // Expected values from RFC 9001 A.2
+        assert_eq!(hex::encode(keys.key), "1f369613dd76d5467730efcbe3b1a22d");
+        assert_eq!(hex::encode(keys.iv), "fa044b2f42a3fd3b46fb255c");
         assert_eq!(hex::encode(keys.hp), "9f50449e04a0e810283a1e9933adedd2");
-    }*/
+    }
+
+    #[test]
+    fn test_rfc9001_appendix_a2_server_initial_keys() {
+        // RFC 9001 Appendix A.2 - Server Initial packet protection keys
+        let server_secret =
+            hex::decode("3c199828fd139efd216c155ad844cc81fb82fa8d7446fa7d78be803acdda951b")
+                .unwrap();
+        let keys = derive_packet_keys(&server_secret).unwrap();
+
+        // Expected values from RFC 9001 A.2
+        assert_eq!(hex::encode(keys.key), "cf3a5331653c364c88f0f379b6067e37");
+        assert_eq!(hex::encode(keys.iv), "0ac1493ca1905853b0bba03e");
+        assert_eq!(hex::encode(keys.hp), "c206b8d9b9f0f37644430b490eeaa314");
+    }
 }
 struct PacketKeys {
-    key: Vec<u8>,
-    iv: Vec<u8>,
-    hp: Vec<u8>,
+    hp: [u8; 16],
+    key: [u8; 16],
+    iv: [u8; 12],
 }
 
-/*fn derive_packet_keys(secret: &[u8]) -> PacketKeys {
-    PacketKeys {
-        key: hkdf_expand_label(secret, "quic key", b"", 16),
-        iv: hkdf_expand_label(secret, "quic iv", b"", 12),
-        hp: hkdf_expand_label(secret, "quic hp", b"", 16),
-    }
-}*/
-
-fn build_nonce(iv: &[u8; 12], packet_number: u64) -> [u8; 12] {
-    let mut nonce = *iv;
-    let pn_bytes = packet_number.to_be_bytes();
-
-    for i in 0..8 {
-        nonce[nonce.len() - 8 + i] ^= pn_bytes[i];
-    }
-    nonce
+fn derive_packet_keys(secret: &[u8]) -> Result<PacketKeys, Parse_error> {
+    Ok(PacketKeys {
+        hp: hkdf_expand_label(secret, "quic hp", 16)?
+            .try_into()
+            .map_err(|_| {
+                Parse_error::new(ParseErrorType::Invalid_TLS_Packet, "QUIC HP key size mismatch")
+            })?,
+        key: hkdf_expand_label(secret, "quic key", 16)?
+            .try_into()
+            .map_err(|_| {
+                Parse_error::new(ParseErrorType::Invalid_TLS_Packet, "QUCI key size mismatch")
+            })?,
+        iv: hkdf_expand_label(secret, "quic iv", 12)?
+            .try_into()
+            .map_err(|_| {
+                Parse_error::new(ParseErrorType::Invalid_TLS_Packet, "QUIC IV size mismatch")
+            })?,
+    })
 }
-
-/*
-fn decrypt_quic_payload(
-    keys: &PacketKeys,
-    packet_number: u64,
-    aad: &[u8],
-    ciphertext: &[u8],
-) -> Result<Vec<u8>, &'static str> {
-    let cipher = Aes128Gcm::new_from_slice(&keys.key)
-        .map_err(|_| "bad key")?;
-
-    let nonce = build_nonce(&keys.iv, packet_number);
-
-    cipher.decrypt(
-        (&nonce).into(),
-        Payload {
-            msg: ciphertext,
-            aad,
-        },
-    ).map_err(|_| "decryption failed")
-}*/
-/*
-fn decrypt_client_handshake(
-    client_keys: &PacketKeys,
-    pn: u64,
-    header: &[u8],
-    encrypted_payload: &[u8],
-) -> Vec<u8> {
-    decrypt_quic_payload(client_keys, pn, header, encrypted_payload)
-        .expect("client decrypt failed")
-}
-fn decrypt_server_handshake(
-    server_keys: &PacketKeys,
-    pn: u64,
-    header: &[u8],
-    encrypted_payload: &[u8],
-) -> Vec<u8> {
-    decrypt_quic_payload(server_keys, pn, header, encrypted_payload)
-        .expect("server decrypt failed")
-}*/
-
-/*
-fn decrypt_qiuc_handshake(packet_info: Packet_info, dcid: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
-    let (client_secret, server_secret) = derive_initial_secret(dcid);
-    let client_keys = derive_packet_keys(&client_secret);
-    let server_keys = derive_packet_keys(&server_secret);
-
-    decrypt_server_handshake(&server_keys, pn, header, &packet_info.tls_server.data);
-    decrypt_client_handshake(&client_keys, pn, header, &packet_info.tls_server.data);
-
-}*/
-
-use aes::Aes128;
-use cipher::generic_array::GenericArray;
-use cipher::{BlockEncrypt, KeyInit};
 
 /// Removes QUIC header protection in-place
 ///
 /// `packet` = full QUIC packet buffer
 /// `pn_offset` = offset of packet number field
 /// `hp_key` = header protection key (16 bytes for AES-128)
-pub fn remove_header_protection(packet: &mut [u8], pn_offset: usize, hp_key: &[u8; 16]) -> usize {
+pub fn remove_header_protection(
+    packet: &mut [u8],
+    pn_offset: usize,
+    hp_key: &[u8; 16],
+) -> Result<usize, Box<dyn Error>> {
     // Sample is always 16 bytes starting 4 bytes after PN start
     let sample_offset = pn_offset + 4;
-    let sample = &packet[sample_offset..sample_offset + 16];
+    let sample = ssl_parse_slice(packet, sample_offset..sample_offset + 16)?;
 
     // Encrypt sample with AES-ECB
     let cipher = Aes128::new(GenericArray::from_slice(hp_key));
@@ -1212,25 +1160,43 @@ pub fn remove_header_protection(packet: &mut [u8], pn_offset: usize, hp_key: &[u
 
     // Packet number length is encoded in low 2 bits
     let pn_len = (packet[0] & 0x03) as usize + 1;
+    if packet.len() < pn_offset + pn_len {
+        return Err(Parse_error::new(
+            ParseErrorType::Invalid_TLS_Packet,
+            &format!("Packet too short {:x}", packet.len()),
+        )
+        .into());
+    }
 
     // Unmask packet number bytes
     for i in 0..pn_len {
         packet[pn_offset + i] ^= mask[1 + i];
     }
 
-    pn_len
+    Ok(pn_len)
 }
 
-fn parse_varint(buf: &[u8]) -> Result<(u64, usize), Box<dyn Error>> {
-    if buf.is_empty() {
+fn parse_varint(buf: &[u8], offset: usize) -> Result<(u64, usize), Parse_error> {
+    let remaining = buf.get(offset..).ok_or_else(|| {
+        Parse_error::new(
+            ParseErrorType::Invalid_TLS_Packet,
+            &format!(
+                "Offset {} out of bounds for buffer length {}",
+                offset,
+                buf.len()
+            ),
+        )
+    })?;
+
+    if remaining.is_empty() {
         return Err(Parse_error::new(
             ParseErrorType::Invalid_TLS_Packet,
-            &format!("Packet  length {:x}", 0),
+            &format!("Empty buffer at offset {}", offset),
         )
         .into());
     }
 
-    let first = buf[0];
+    let first = remaining[0];
     let len = match first >> 6 {
         0b00 => 1,
         0b01 => 2,
@@ -1239,118 +1205,337 @@ fn parse_varint(buf: &[u8]) -> Result<(u64, usize), Box<dyn Error>> {
         _ => unreachable!(),
     };
 
-    if buf.len() < len {
+    if remaining.len() < len {
         return Err(Parse_error::new(
             ParseErrorType::Invalid_TLS_Packet,
-            &format!("Packet  length {:x}", buf.len()),
+            &format!(
+                "Packet too short: expected {} bytes, got {}",
+                len,
+                remaining.len()
+            ),
         )
         .into());
     }
 
     let mut value = (first & 0x3f) as u64;
-    for &b in &buf[1..len] {
-        value = (value << 8) | b as u64;
+    for i in 1..len {
+        value = (value << 8) | remaining[i] as u64;
     }
 
     Ok((value, len))
+}
+fn decrypt_quic_payload(
+    aead_key: &[u8],
+    iv: &[u8],
+    packet_number: u64,
+    ciphertext: &mut [u8],
+    aad: &[u8],
+) -> Result<usize, Box<dyn Error>> {
+    if aead_key.len() != 16 || iv.len() != 12 {
+        return Err(Parse_error::new(
+            ParseErrorType::Invalid_TLS_Packet,
+            &format!( "Mismatch IV and AAD length {} {} ", aead_key.len(), iv.len() )).into());
+    }
+
+   // debug!("payload: {:x?} {}", &ciphertext[0..4], ciphertext.len());
+    let cipher = Aes128Gcm::new(GenericArray::from_slice(aead_key));
+
+    // compute nonce = IV ⊕ packet_number
+    let mut nonce_bytes = [0u8; 12];
+    nonce_bytes.copy_from_slice(iv);
+    let pn_bytes = packet_number.to_be_bytes(); // 8 bytes
+    // XOR last 8 bytes of IV with packet number
+    for i in 0..8 {
+        nonce_bytes[4 + i] ^= pn_bytes[i];
+    }
+    let nonce = GenericArray::from_slice(&nonce_bytes);
+    let tag_pos = ciphertext.len().saturating_sub(16);
+    let (data, tag) = ciphertext.split_at_mut(tag_pos);
+    let tag = aes_gcm::Tag::from_slice(tag);
+    cipher.decrypt_in_place_detached( nonce, aad, data, tag).map_err(|_| Parse_error::new(ParseErrorType::Invalid_TLS_Packet, "Decryption failed"))?;
+    Ok(ciphertext.len().saturating_sub(16))
+
+}
+
+
+#[inline]
+fn skip_varint(buf: &[u8], pos: usize) -> Option<usize> {
+    let first = *buf.get(pos)?;
+    let len = match first >> 6 {
+        0b00 => 1,
+        0b01 => 2,
+        0b10 => 4,
+        0b11 => 8,
+        _ => unreachable!(),
+    };
+    if pos + len > buf.len() {
+        None
+    } else {
+        Some(len)
+    }
+}
+
+fn parse_ack_frame(buf: &[u8], pos_in: usize) -> Result<usize, Parse_error> {
+    let mut pos = pos_in;
+    let (_, len) = parse_varint(buf, pos)?;
+    pos += len;
+    let (_, len) = parse_varint(buf, pos)?;
+    pos += len;
+    let (range_count, len) = parse_varint(buf, pos)?;
+    pos += len;
+    let (_, len) = parse_varint(buf, pos)?;
+    pos += len;
+    if range_count > (buf.len().saturating_sub(pos) as u64 / 2) {
+        return Err(Parse_error::new(ParseErrorType::Invalid_TLS_Packet, "Invalid range count: exceeds remaining buffer capacity").into());
+    }
+    for _ in 0..range_count as usize {
+        // Gap
+        pos += skip_varint(buf, pos).ok_or_else(|| Parse_error::new(ParseErrorType::Invalid_TLS_Packet, "ACK Gap"))?;
+        // Length
+        pos += skip_varint(buf, pos).ok_or_else(|| Parse_error::new(ParseErrorType::Invalid_TLS_Packet, "ACK Range Len"))?;
+    }
+    Ok(pos - pos_in)
+}
+
+fn process_quic_handshake_data(
+    is_client: bool,
+    packet_info: &mut Packet_info,
+    statistics: &mut Statistics,
+) -> Result<(), Box<dyn Error>> {
+    if is_client {
+        packet_info.tls_client.done = true;
+        let mut client_data = packet_info.tls_client.data.clone();
+        if !client_data.is_empty() {
+            parse_tls_handshake(&mut client_data, packet_info, statistics)?;
+        }
+    } else {
+        packet_info.tls_server.done = true;
+        let mut server_data = packet_info.tls_server.data.clone();
+        if !server_data.is_empty() {
+            parse_tls_handshake(&mut server_data, packet_info, statistics)?;
+        }
+    }
+    Ok(())
+}
+
+fn ssl_read_packet_number(
+    packet: &[u8],
+    offset: usize,
+    pn_len: usize,
+) -> Result<u32, Parse_error> {
+    match pn_len {
+        1 => Ok(ssl_read_u8(packet, offset)? as u32),
+        2 => Ok(ssl_read_u16(packet, offset)? as u32),
+        3 => Ok(ssl_read_u24(packet, offset)?),
+        4 => Ok(ssl_read_u32(packet, offset)?),
+        _ => Err(Parse_error::new(
+            ParseErrorType::Invalid_TLS_Packet,
+            &format!("Packet number length {pn_len}"),
+        )
+        .into()),
+    }
+}
+
+
+const MAX_HANDSHAKE_SIZE: u64 = 30000;
+
+fn parse_crypto_frame(
+    packet_payload: &[u8],
+    mut crypto_offset: usize,
+    is_client: bool,
+    packet_info: &mut Packet_info,
+    frame_type: u64,
+) -> Result<usize, Box<dyn Error>> {
+    let start_offset = crypto_offset;
+   // debug!("Crypto frame");
+    let (offset, len) = parse_varint(packet_payload, crypto_offset)?;
+    crypto_offset += len;
+    let (length, len) = parse_varint(packet_payload, crypto_offset)?;
+    crypto_offset += len;
+    //debug!("QUIC frame type: {frame_type:x} offset {offset} len: {length} ");
+    let crypto_data = ssl_parse_slice(
+        packet_payload,
+        crypto_offset..crypto_offset + length as usize,
+    )?;
+    /*debug!(
+        "QUIC frame type: {frame_type:x} offset {offset} len: {length} data {:x?}",
+        &crypto_data[0..std::cmp::min(4, crypto_data.len())]
+    );*/
+    let store_data = if is_client {
+        packet_info.tls_client.packet_count += 1;
+        &mut packet_info.tls_client.data
+    } else {
+        packet_info.tls_server.packet_count += 1;
+        &mut packet_info.tls_server.data
+    };
+    let total_required = offset.checked_add(length).unwrap_or(u64::MAX);
+
+    if total_required > MAX_HANDSHAKE_SIZE {
+        return Err(Parse_error::new(
+            ParseErrorType::Invalid_TLS_Packet,
+            &format!("Length and offset too large {} {}", length, offset),
+        )
+        .into());
+    }
+    if store_data.len() < (total_required as usize) {
+        store_data.resize(total_required as usize, 0);
+    }
+    store_data[offset as usize..total_required as usize].copy_from_slice(crypto_data);
+
+    Ok((crypto_offset + length as usize) - start_offset)
 }
 
 fn parse_quic(
     packet: &mut [u8],
     config: &Config,
     packet_info_list: &mut Packet_Info_List,
-    _ts: DateTime<Utc>,
+    ts: DateTime<Utc>,
     source_ip: &IpAddr,
     dest_ip: &IpAddr,
     sp: u16,
     dp: u16,
+    statistics: &mut Statistics,
 ) -> Result<(), Box<dyn Error>> {
+    let is_client = config.ports.contains(&dp);
     let mut offset = 0;
     let flag = ssl_read_u8(packet, offset)?;
-    debug!("QUIC flag: {:x} {:x}", flag, flag & 0x80);
-    if flag & 0x30 != 0 {
-        //         not an initial packet
+    let packet_key = if is_client {
+        (*source_ip, *dest_ip, sp, dp)
+    } else {
+        (*dest_ip, *source_ip, dp, sp)
+    };
+    let packet_info = packet_info_list
+        .packets
+        .entry(packet_key)
+        .or_insert_with(|| {
+            Packet_info::new(
+                ts,
+                packet_key.2,
+                packet_key.3,
+                packet_key.0.clone(),
+                packet_key.1.clone(),
+                &TLS_Protocol::QUIC,
+            )
+        });
+    if flag & 0x3 == 0 || flag & 0x80 != 0x80 {
+        // not an i=itial packet or not a long header
         return Ok(());
     }
-    debug!(
-        "QUIC packet {source_ip} {dest_ip} {sp} {dp} {:x?}",
-        &packet[0..min(64, packet.len())]
-    );
-    if flag & 0x80 == 0x80 {
-        // long header
-        let version = ssl_read_u32(packet, offset + 1)?;
-        if version != 1 {
-            return Err(Parse_error::new(
-                ParseErrorType::Invalid_TLS_Packet,
-                &format!("Version = {:x}", version),
-            )
+    if flag & 0x80 != 0x80 || flag & 0x40 == 0 {
+        // Should check the Fixed Bit (0x40)
+        return Ok(());
+    }
+    if flag & 0x30 == 0x20 {
+      //  debug!("Handshake");
+        process_quic_handshake_data(is_client, packet_info, statistics)?;
+        return Ok(());
+    }
+
+    if flag & 0x30 != 00 {
+       // debug!("Not an initial packet");
+        return Ok(());
+    }
+    let version = ssl_read_u32(packet, offset + 1)?;
+    if version != 1 {
+        return Err(Parse_error::new(
+            ParseErrorType::Invalid_TLS_Packet,
+            &format!("Version = {:x}", version),
+        )
             .into());
-        }
-        debug!("QUIC version: {:x} {}", version, offset);
-        let d_conn_id_len = ssl_read_u8(packet, offset + 5)?;
-        let d_conn_id = ssl_parse_slice(packet, offset + 6..offset + 6 + d_conn_id_len as usize)?;
-        offset = 6 + d_conn_id_len as usize;
-        let s_conn_id_len = ssl_read_u8(packet, offset)?;
-        let s_conn_id = ssl_parse_slice(packet, offset + 1..offset + 1 + s_conn_id_len as usize)?;
-        offset += 1 + s_conn_id_len as usize;
-        debug!(
+    }
+    let d_conn_id_len = ssl_read_u8(packet, offset + 5)?;
+    if d_conn_id_len > 20 {
+        return Err(Parse_error::new(
+            ParseErrorType::Invalid_TLS_Packet,
+            &format!("D conn Id > 20 {}", d_conn_id_len),
+        )
+            .into());
+    }
+    let d_conn_id = ssl_parse_slice(packet, offset + 6..offset + 6 + d_conn_id_len as usize)?;
+    offset = 6 + d_conn_id_len as usize;
+    let s_conn_id_len = ssl_read_u8(packet, offset)?;
+    if s_conn_id_len > 20 {
+        return Err(Parse_error::new(
+            ParseErrorType::Invalid_TLS_Packet,
+            &format!("s conn Id > 20 {}", s_conn_id_len),
+        )
+            .into());
+    }
+    let s_conn_id = ssl_parse_slice(packet, offset + 1..offset + 1 + s_conn_id_len as usize)?;
+    offset += 1 + s_conn_id_len as usize;
+    /*debug!(
             "QUIC d_conn_id {:x} {:x?}, {:x }{:x?} {}",
             d_conn_id_len, d_conn_id, s_conn_id_len, s_conn_id, offset
-        );
-        let (client_secret, server_secret) = derive_initial_secret(d_conn_id);
-        let secret = if config.ports.contains(&sp) {
-            server_secret
-        } else {
-            client_secret
-        };
-        let hp_key = hkdf_expand_label(&secret, "quic hp", 16);
-        let hp_key_array: [u8; 16] = hp_key
-            .try_into()
-            .expect("Invalid header protection key length");
-        let token_len = ssl_read_u8(packet, offset)?;
-        let _token = ssl_parse_slice(packet, offset + 1..offset + 1 + token_len as usize)?;
-        offset += 1 + token_len as usize;
-        let (len, size) = parse_varint(&ssl_parse_slice(packet, offset..)?)?;
-        offset += size;
-        //let pn_offset = 6 + d_conn_id_len as usize + s_conn_id_len as usize + token_len as usize + size;
-        let pn_len = remove_header_protection(packet, offset, &hp_key_array);
-        //let len = ssl_read_u16(packet, offset + 1)?;
-        let packet_number = match pn_len {
-            1 => ssl_read_u8(packet, offset)? as u32,
-            2 => ssl_read_u16(packet, offset)? as u32,
-            3 => ssl_read_u24(packet, offset)?,
-            4 => ssl_read_u32(packet, offset)?,
-            _ => {
-                return Err(Parse_error::new(
-                    ParseErrorType::Invalid_TLS_Packet,
-                    &format!("Packet number length {:x}", pn_len),
-                )
-                .into())
-            }
-        };
-        offset += pn_len;
-        debug!("QUIC  len: {}", len);
-        debug!("QUIC packet nr: {}", packet_number);
+        );*/
+
+    if packet_info.initial_client_secret.is_empty() && is_client {
+        let (client_secret, server_secret) = derive_initial_secret(d_conn_id)?;
+        packet_info.initial_client_secret = client_secret;
+        packet_info.initial_server_secret = server_secret;
+    } else if !is_client && packet_info.initial_server_secret.is_empty() {
+        return Err(Parse_error::new(
+            ParseErrorType::Invalid_TLS_Packet,
+            &"Missed initial d_conn_id ".to_string(),
+        )
+            .into());
+    }
+    let secret = if !is_client {
+        &packet_info.initial_server_secret
     } else {
-        let _d_conn_id = ssl_parse_slice(packet, 1..8)?;
-        //offset = 8;
-        return Ok(());
-        // not interested in short headers, handshakes have long headers
+        &packet_info.initial_client_secret
+    };
+    let p_key = derive_packet_keys(secret)?;
+    let (token_len, len) = parse_varint(packet, offset)?;
+    offset += len + token_len as usize;
+    let (len, size) = parse_varint(&packet, offset)?;
+    offset += size;
+    let pn_len = remove_header_protection(packet, offset, &p_key.hp)?;
+    let packet_number = ssl_read_packet_number(packet, offset, pn_len)?;
+
+    offset += pn_len;
+    //debug!("QUIC packet nr: {packet_number} QUIC len: {len}");
+   // debug!("Frame {:x}", packet[offset]);
+    if len < pn_len as u64 {
+        return Err(Parse_error::new(
+            ParseErrorType::Invalid_TLS_Packet,
+            &format!("Invalid packet length {pn_len} "),
+        )
+            .into());
+
     }
-    let frame_type = ssl_read_u8(packet, offset)?;
-    offset += 1;
-    debug!("QUIC frame type: {:x}", frame_type);
-    if frame_type == 0x06 {
-        let _frame_offset = ssl_read_u16(packet, offset)?;
-        let length = ssl_read_u16(packet, offset + 2)?;
-        let _data = ssl_parse_slice(packet, offset + 4..offset + 4 + length as usize)?;
-        //  CRYPTO
-        return Ok(());
-    } else if frame_type == 0x02 {
-        // ACK
-    } else if frame_type == 0x00 {
-        // PADDING
+    let mut payload_slice = ssl_parse_slice(packet, offset..offset + len as usize - pn_len)?.to_vec();
+    let payload_size = decrypt_quic_payload(
+        &p_key.key,
+        &p_key.iv,
+        packet_number as u64,
+        &mut payload_slice,
+        &packet[0..offset],
+    )?;
+    debug!("QUIC packet len {} ", payload_size);
+    let mut crypto_offset = 0;
+    while crypto_offset < payload_size{
+        let (frame_type, len) = parse_varint(&payload_slice, crypto_offset)?;
+        crypto_offset += len;
+
+        if frame_type == 0x06 {
+            crypto_offset += parse_crypto_frame(
+                &payload_slice,
+                crypto_offset,
+                is_client,
+                packet_info,
+                frame_type,
+            )?;
+        } else if frame_type == 0x02 {
+            crypto_offset += parse_ack_frame(&payload_slice, crypto_offset)?;
+            // ACK
+        } else if frame_type == 0x00 {
+            crypto_offset = payload_slice.len();
+            // PADDING
+        } else {
+            break;
+        }
     }
+    // not interested in short headers, handshakes have long headers
 
     Ok(())
 }

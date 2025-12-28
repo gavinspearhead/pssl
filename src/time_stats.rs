@@ -45,7 +45,7 @@ impl Bucket {
             self.items[0..pos].fill(0);
             self.items[pos] = count;
         } else {
-            self.items = vec![0; len];
+            self.items.fill(0);
             self.items[pos] = count;
         }
         self.last_post = pos;

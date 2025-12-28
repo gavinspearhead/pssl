@@ -236,3 +236,11 @@ pub fn truncated_hash_hex(input: &str) -> String {
     // take first 6 or 8 hex characters as the fingerprint component
     hex::encode(&result)[..12].to_string()
 }
+
+#[inline]
+pub fn filter_grease(list: &[u16]) -> Vec<u16> {
+    list.iter()
+        .filter(|&&v| (v & 0x0F0F) != 0x0A0A)
+        .cloned()
+        .collect()
+}

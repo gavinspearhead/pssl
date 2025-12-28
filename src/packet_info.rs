@@ -15,7 +15,7 @@ use std::{
 pub(crate) struct Packet_Info_List {
     pub(crate) packets: HashMap<(IpAddr, IpAddr, u16, u16), Packet_info>,
     // timelimit: u64,
-    max_tcp_len: u32,
+    //max_tcp_len: u32,
 }
 
 impl Packet_Info_List {
@@ -71,6 +71,8 @@ pub(crate) struct Packet_info {
     pub s_addr: IpAddr,
     pub d_addr: IpAddr,
     pub protocol: TLS_Protocol,
+    pub initial_client_secret: Vec<u8>,
+    pub initial_server_secret: Vec<u8>,
     pub tls_client: TLS_Client_data,
     pub tls_server: TLS_Server_data,
 }
@@ -85,6 +87,8 @@ impl Default for Packet_info {
             s_addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             d_addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             protocol: TLS_Protocol::TCP,
+            initial_client_secret: Vec::new(),
+            initial_server_secret: Vec::new(),
             tls_client: TLS_Client_data::default(),
             tls_server: TLS_Server_data::default(),
         }

@@ -39,9 +39,9 @@ impl Mysql_connection {
     pub fn insert_or_update_record(&mut self, record: &Packet_info) {
         let i = record;
         let ts = i.timestamp.timestamp();
-        let q = r"INSERT INTO pssl (ip, port, host, version, cipher, curve, last_seen, first_seen, ja4s, count, asn, asn_owner, domain, prefix)
+        let q = r"INSERT INTO pssl (ip, port, host, version, cipher, curve, last_seen, first_seen, ja4s, count, asn, asn_owner, domain, prefix, protocol)
             VALUES (
-                ?, ?, ? ,?, ?, ?, FROM_UNIXTIME(?),FROM_UNIXTIME(?),?, ?, ?, ?, ?, ?)
+                ?, ?, ? ,?, ?, ?, FROM_UNIXTIME(?),FROM_UNIXTIME(?),?, ?, ?, ?, ?, ?, ?)
                ON DUPLICATE KEY UPDATE
                 COUNT = COUNT + ?,
                 LAST_SEEN = GREATEST(LAST_SEEN, FROM_UNIXTIME(?)),
@@ -49,7 +49,7 @@ impl Mysql_connection {
                 ";
         debug!(
             "{} {} {} {} {}",
-            i.d_addr,
+            i.d_addr.to_string(),
             i.dp,
             i.tls_client.sni,
             i.tls_server.version,
@@ -58,7 +58,7 @@ impl Mysql_connection {
 
         let q_res = block_on(
             sqlx::query(q)
-                .bind(&i.d_addr)
+                .bind(i.d_addr.to_string())
                 .bind(&i.dp)
                 .bind(&i.tls_client.sni)
                 .bind(&i.tls_server.version)
@@ -72,6 +72,7 @@ impl Mysql_connection {
                 .bind(&i.tls_server.asn_owner)
                 .bind(&i.tls_server.domain)
                 .bind(&i.tls_server.prefix)
+                .bind(i.protocol.as_str())
                 .bind(1)
                 .bind(ts)
                 .bind(ts)
@@ -86,23 +87,23 @@ impl Mysql_connection {
                 error!("Error: {}", e);
             }
         }
-        let q2 = r"INSERT INTO pssl_client (ip, version, last_seen, first_seen, ja4c, count)
+        let q2 = r"INSERT INTO pssl_client (ip, version, last_seen, first_seen, ja4c, count, protocol)
             VALUES (
-                ?, ?, FROM_UNIXTIME(?),FROM_UNIXTIME(?),?, ?)
+                ?, ?, FROM_UNIXTIME(?),FROM_UNIXTIME(?),?, ?, ?)
                ON DUPLICATE KEY UPDATE
                 COUNT = COUNT + ?,
                 LAST_SEEN = GREATEST(LAST_SEEN, FROM_UNIXTIME(?)),
                 FIRST_SEEN = LEAST(FROM_UNIXTIME(?), FIRST_SEEN)
                 ";
-        debug!("version {}", &i.tls_server.version);
         let q_res = block_on(
             sqlx::query(q2)
-                .bind(&i.s_addr)
+                .bind(i.s_addr.to_string())
                 .bind(&i.tls_server.version)
                 .bind(ts)
                 .bind(ts)
                 .bind(&i.tls_client.ja4c)
                 .bind(1)
+                .bind(i.protocol.as_str())
                 .bind(1)
                 .bind(ts)
                 .bind(ts)
@@ -121,13 +122,15 @@ impl Mysql_connection {
         let create_cmd1 = r"
   `id` bigint(20) NOT NULL AUTO_INCREMENT,
   `ip` varchar(64) DEFAULT NULL,
+  'protocol' varchar(16) DEFAULT NULL,
   `version` varchar(16) DEFAULT NULL,
   `ja4c` varchar(256) DEFAULT NULL,
   `last_seen` datetime DEFAULT NULL,
   `first_seen` datetime DEFAULT NULL,
   `count` bigint(20) DEFAULT NULL,
+
   PRIMARY KEY (`id`),
-  UNIQUE KEY `dups1` (`ip`,`version`, `ja4s`)
+  UNIQUE KEY `dups1` (`ip`,`version`, `ja4s`, `protocol`)
 ) ENGINE=MyISAM DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci;
         ";
         match block_on(sqlx::query(create_cmd1).execute(&self.pool)) {
@@ -145,6 +148,7 @@ impl Mysql_connection {
   `id` bigint(20) NOT NULL AUTO_INCREMENT,
   `ip` varchar(64) DEFAULT NULL,
   `port` int(11) DEFAULT NULL,
+  'protocol' varchar(16) DEFAULT NULL,
   `host` varchar(255) DEFAULT NULL,
   `version` varchar(16) DEFAULT NULL,
   `cipher` varchar(256) DEFAULT NULL,
@@ -158,7 +162,7 @@ impl Mysql_connection {
   `domain` varchar(256) DEFAULT NULL,
   `prefix` varchar(256) DEFAULT NULL,
   PRIMARY KEY (`id`),
-  UNIQUE KEY `dups1` (`ip`,`port`,`host`,`version`,`cipher`, `curve`, `ja4s`)
+  UNIQUE KEY `dups1` (`ip`,`port`,`host`,`version`,`cipher`, `curve`, `ja4s`, `protocol`))
 ) ENGINE=MyISAM DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci;
 
       ";
