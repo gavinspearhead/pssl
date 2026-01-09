@@ -2,6 +2,7 @@ use crate::tls_groups::TlsSupportedGroup::Known;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use strum_macros::{EnumIter, EnumString, FromRepr, IntoStaticStr};
+use crate::ssl_helper::is_grease;
 
 #[derive(
     EnumIter,
@@ -93,9 +94,9 @@ pub enum TlsSupportedGroupValue {
 pub enum TlsSupportedGroup {
     Known(TlsSupportedGroupValue),
     Unknown(u16),
+    Grease
 }
 
-// ... existing code ...
 impl Serialize for TlsSupportedGroup {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -103,22 +104,41 @@ impl Serialize for TlsSupportedGroup {
     {
         let value: Cow<'static, str> = match self {
             TlsSupportedGroup::Known(known) => Cow::Borrowed(known.into()),
-            TlsSupportedGroup::Unknown(unknown) => Cow::Owned(format!("Unknown ({})", unknown)),
+            TlsSupportedGroup::Unknown(unknown) => Cow::Owned(format!("Unknown ({unknown:x})")),
+            TlsSupportedGroup::Grease => Cow::Borrowed("Grease"),
         };
         value.serialize(serializer)
     }
 }
-// ... existing code ...
-
 impl<'de> Deserialize<'de> for TlsSupportedGroup {
     fn deserialize<D>(deserializer: D) -> Result<TlsSupportedGroup, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        let id = u16::deserialize(deserializer)?;
-        Ok(TlsSupportedGroup::from_u16(id).unwrap_or(TlsSupportedGroup::Unknown(id)))
+        let s = Cow::<'de, str>::deserialize(deserializer)?;
+
+        if s == "Grease" {
+            return Ok(TlsSupportedGroup::Grease);
+        }
+
+        // Try to parse as a known variant name
+        if let Ok(value) = TlsSupportedGroupValue::try_from(s.as_ref()) {
+            return Ok(TlsSupportedGroup::Known(value));
+        }
+
+        // Handle "Unknown (hex)" format
+        if s.starts_with("Unknown (") && s.ends_with(')') {
+            let hex_part = &s[9..s.len() - 1];
+            if let Ok(id) = u16::from_str_radix(hex_part, 16) {
+                return Ok(TlsSupportedGroup::from_u16(id).unwrap_or(TlsSupportedGroup::Unknown(id)));
+            }
+        }
+
+        // Fallback or error
+        Ok(TlsSupportedGroup::Unknown(0))
     }
 }
+
 
 impl Default for TlsSupportedGroup {
     fn default() -> Self {
@@ -127,27 +147,37 @@ impl Default for TlsSupportedGroup {
 }
 
 impl TlsSupportedGroup {
+    #[must_use] 
     pub fn from_u16(id: u16) -> Option<Self> {
-        match TlsSupportedGroupValue::from_repr(id) {
-            Some(known) => Some(TlsSupportedGroup::Known(known)),
-            None => Some(TlsSupportedGroup::Unknown(id)),
+        if is_grease(id) {
+            Some(TlsSupportedGroup::Grease)
+        } else {
+            match TlsSupportedGroupValue::from_repr(id) {
+                Some(known) => Some(TlsSupportedGroup::Known(known)),
+                None => Some(TlsSupportedGroup::Unknown(id)),
+            }
         }
     }
+    #[must_use] 
     pub fn to_u16(self) -> u16 {
         match self {
             Known(known) => known as u16,
             TlsSupportedGroup::Unknown(unknown) => unknown,
+            TlsSupportedGroup::Grease => 0x0a0a,
         }
     }
 
     #[inline]
+    #[must_use] 
     pub fn to_str(self) -> Cow<'static, str> {
         match self {
             Known(known) => Cow::Borrowed(known.into()),
-            TlsSupportedGroup::Unknown(val) => Cow::Owned(format!("Unknown ({val})")),
+            TlsSupportedGroup::Unknown(val) => Cow::Owned(format!("Unknown ({val:x})")),
+            TlsSupportedGroup::Grease => Cow::Borrowed("Grease"),
         }
     }
 
+    #[must_use] 
     pub fn as_str(self) -> String {
         self.to_str().into_owned()
     }

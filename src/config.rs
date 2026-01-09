@@ -42,7 +42,9 @@ pub(crate) struct Config {
 
 impl Config {
     pub(crate) fn new() -> Config {
-        let c = Config {
+
+
+        Config {
             interface: String::new(),
             filter: String::new(),
             output: String::new(),
@@ -76,9 +78,7 @@ impl Config {
             export_stats: String::new(),
             import_stats: String::new(),
             ports: vec![443],
-        };
-
-        c
+        }
     }
     pub(crate) fn from_str(config_str: &str) -> Result<Config, serde_json::Error> {
         serde_json::from_str(config_str)
@@ -223,15 +223,20 @@ pub(crate) fn parse_config(config: &mut Config, pcap_path: &mut String, create_d
                 .required(false)
                 .long_help("Port number for the live dump to listen on (0 to disable)"),
         )
+        .arg(
+                arg!(-M --import_stats <VALUE>)
+                    .required(false)
+                    .default_missing_value("")
+                    .long_help("Import stats from json file"),
+        )
         .arg(arg!(--ports <VALUE>).required(false).long_help(
             "Port numbers to listen on for packet capture, comma separated (default 443)",
         ))
         .get_matches();
     let empty_str = String::new();
-    config.config_file = matches
+    config.config_file.clone_from(matches
         .get_one::<String>("config")
-        .unwrap_or(&String::from_str(&empty_str).unwrap())
-        .clone();
+        .unwrap_or(&String::from_str(&empty_str).unwrap()));
     if !config.config_file.is_empty() {
         let config_str = std::fs::read_to_string(&config.config_file).unwrap_or_default();
         if !config_str.is_empty() {
@@ -272,7 +277,10 @@ pub(crate) fn parse_config(config: &mut Config, pcap_path: &mut String, create_d
         .get_one::<String>("filter")
         .unwrap_or(&config.filter)
         .clone();
-
+    config.import_stats = matches
+        .get_one::<String>("import_stats")
+        .unwrap_or(&config.import_stats)
+        .clone();
     config.output = matches
         .get_one::<String>("output")
         .unwrap_or(&config.output)

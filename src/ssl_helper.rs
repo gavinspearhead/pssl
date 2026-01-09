@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::ops::RangeBounds;
 
-pub(crate) fn ssl_parse_slice<T>(packet: &[u8], range: T) -> Result<&[u8], Parse_error>
+pub(crate) fn ssl_parse_slice<T>(packet: &[u8], range: T) -> Result<& [u8], Parse_error>
 where
     T: RangeBounds<usize>,
 {
@@ -27,7 +27,28 @@ where
         Err(Parse_error::new(Invalid_packet_index, " {start}..{end}"))
     }
 }
+pub(crate) fn ssl_parse_slice_mut <T>(packet: &mut [u8], range: T) -> Result<&mut [u8], Parse_error>
+where
+    T: RangeBounds<usize>,
+{
+    let start = match range.start_bound() {
+        std::ops::Bound::Included(&s) => s,
+        std::ops::Bound::Excluded(&s) => s + 1,
+        std::ops::Bound::Unbounded => 0,
+    };
 
+    let end = match range.end_bound() {
+        std::ops::Bound::Included(&e) => e + 1,
+        std::ops::Bound::Excluded(&e) => e,
+        std::ops::Bound::Unbounded => packet.len(),
+    };
+
+    if start <= end && end <= packet.len() {
+        Ok(&mut packet[start..end])
+    } else {
+        Err(Parse_error::new(Invalid_packet_index, " {start}..{end}"))
+    }
+}
 pub(crate) fn parse_ssl_str(rdata: &[u8]) -> Result<String, Parse_error> {
     if let Ok(x) = std::str::from_utf8(rdata) {
         Ok(x.to_owned())
@@ -216,7 +237,7 @@ mod tests {
 
 pub fn join_u16(list: &[u16]) -> String {
     list.iter()
-        .map(|v| v.to_string())
+        .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join("-")
 }
@@ -224,23 +245,31 @@ pub fn join_u16(list: &[u16]) -> String {
 // Helper to join u7 lists with '-'
 pub fn join_u8(list: &[u8]) -> String {
     list.iter()
-        .map(|v| v.to_string())
+        .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join("-")
 }
 /// Helper: compute SHA-256 of a string, then take the first 12 hex characters (for example)
+#[must_use] 
 pub fn truncated_hash_hex(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     let result = hasher.finalize();
     // take first 6 or 8 hex characters as the fingerprint component
-    hex::encode(&result)[..12].to_string()
+    hex::encode(result)[..12].to_string()
 }
 
 #[inline]
+#[must_use] 
 pub fn filter_grease(list: &[u16]) -> Vec<u16> {
     list.iter()
-        .filter(|&&v| (v & 0x0F0F) != 0x0A0A)
-        .cloned()
+        .filter(|&&v| !is_grease(v))
+        .copied()
         .collect()
+}
+
+#[inline]
+#[must_use] 
+pub fn is_grease(v: u16) -> bool {
+    (v & 0x0F0F) == 0x0A0A
 }

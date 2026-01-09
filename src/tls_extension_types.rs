@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use strum_macros::{EnumIter, EnumString, FromRepr, IntoStaticStr};
@@ -20,7 +21,7 @@ use strum_macros::{EnumIter, EnumString, FromRepr, IntoStaticStr};
     Deserialize,
 )]
 #[repr(u16)]
-pub enum TlsExtensionType {
+pub enum TlsExtensionTypeValue {
     // RFC 3546 / RFC 4366 / RFC 6066
     ServerNameIndication = 0, // SNI
     MaxFragmentLength = 1,
@@ -108,21 +109,68 @@ pub enum TlsExtensionType {
     #[default]
     Unknown = 0xFFFF,
 }
+#[derive(Debug, PartialEq, Clone, Copy, Eq, Hash, PartialOrd, Ord)]
+
+pub enum TlsExtensionType {
+    Known(TlsExtensionTypeValue),
+    Unknown(u16),
+}
+
+impl Default for TlsExtensionType {
+    fn default() -> Self {
+        TlsExtensionType::Unknown(0xFFFF)
+    }
+}
 
 impl TlsExtensionType {
+    #[must_use] 
     pub fn from_u16(id: u16) -> Option<Self> {
-        Self::from_repr(id)
+        match TlsExtensionTypeValue::from_repr(id) {
+            Some(known) => Some(TlsExtensionType::Known(known)),
+            None => Some(TlsExtensionType::Unknown(id)),
+        }
     }
-    pub fn to_u16(self) -> u16 {
-        self as u16
+    #[must_use] 
+    pub fn to_u16(&self) -> u16 {
+        match self {
+           TlsExtensionType::Unknown(unknown) => *unknown,
+            TlsExtensionType::Known(known)=> *known as u16,
+        }
     }
-    pub fn as_str(self) -> &'static str {
-        self.into()
+    #[must_use] 
+    pub fn as_str(self) -> String {
+        match self {
+            TlsExtensionType::Known(known) => Cow::Borrowed(known.into()),
+            TlsExtensionType::Unknown(val) => Cow::Owned(format!("Unknown ({val:x})")),
+        }.into_owned()
     }
 }
 
 impl Display for TlsExtensionType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
+    }
+}
+
+impl Serialize for TlsExtensionType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let value: Cow<'static, str> = match self {
+            TlsExtensionType::Known(known) => Cow::Borrowed(known.into()),
+            TlsExtensionType::Unknown(unknown) => Cow::Owned(format!("Unknown ({unknown:x})")),
+        };
+        value.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for TlsExtensionType {
+    fn deserialize<D>(deserializer: D) -> Result<TlsExtensionType, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let id = u16::deserialize(deserializer)?;
+        Ok(TlsExtensionType::from_u16(id).unwrap_or(TlsExtensionType::Unknown(id)))
     }
 }

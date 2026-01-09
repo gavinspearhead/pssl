@@ -47,21 +47,21 @@ impl Mysql_connection {
                 LAST_SEEN = GREATEST(LAST_SEEN, FROM_UNIXTIME(?)),
                 FIRST_SEEN = LEAST(FROM_UNIXTIME(?), FIRST_SEEN)
                 ";
-        debug!(
+       /* debug!(
             "{} {} {} {} {}",
             i.d_addr.to_string(),
             i.dp,
             i.tls_client.sni,
             i.tls_server.version,
             i.tls_server.group.to_u16(),
-        );
+        );*/
 
         let q_res = block_on(
             sqlx::query(q)
                 .bind(i.d_addr.to_string())
-                .bind(&i.dp)
+                .bind(i.dp)
                 .bind(&i.tls_client.sni)
-                .bind(&i.tls_server.version)
+                .bind(i.tls_server.version)
                 .bind(i.tls_server.cipher.as_str())
                 .bind(i.tls_server.group.as_str())
                 .bind(ts)
@@ -72,7 +72,7 @@ impl Mysql_connection {
                 .bind(&i.tls_server.asn_owner)
                 .bind(&i.tls_server.domain)
                 .bind(&i.tls_server.prefix)
-                .bind(i.protocol.as_str())
+                .bind(i.tls_protocol.as_str())
                 .bind(1)
                 .bind(ts)
                 .bind(ts)
@@ -80,8 +80,8 @@ impl Mysql_connection {
         );
 
         match q_res {
-            Ok(x) => {
-                debug!("Success PSSL {:?}", x);
+            Ok(_x) => {
+                //debug!("Success PSSL {:?}", x);
             }
             Err(e) => {
                 error!("Error: {}", e);
@@ -98,12 +98,12 @@ impl Mysql_connection {
         let q_res = block_on(
             sqlx::query(q2)
                 .bind(i.s_addr.to_string())
-                .bind(&i.tls_server.version)
+                .bind(i.tls_server.version)
                 .bind(ts)
                 .bind(ts)
                 .bind(&i.tls_client.ja4c)
                 .bind(1)
-                .bind(i.protocol.as_str())
+                .bind(i.tls_protocol.as_str())
                 .bind(1)
                 .bind(ts)
                 .bind(ts)
@@ -111,7 +111,7 @@ impl Mysql_connection {
         );
         match q_res {
             Ok(x) => {
-                debug!("Success PSSL_Client {:?}", x);
+               // debug!("Success PSSL_Client {:?}", x);
             }
             Err(e) => {
                 error!("Error: {}", e);
@@ -135,7 +135,7 @@ impl Mysql_connection {
         ";
         match block_on(sqlx::query(create_cmd1).execute(&self.pool)) {
             Ok(x) => {
-                debug!("Success {:?}", x);
+               // debug!("Success {:?}", x);
             }
             Err(e) => {
                 error!("Error: {}", e);
@@ -168,7 +168,7 @@ impl Mysql_connection {
       ";
         match block_on(sqlx::query(create_cmd2).execute(&self.pool)) {
             Ok(x) => {
-                debug!("Success {:?}", x);
+               // debug!("Success {:?}", x);
             }
             Err(e) => {
                 error!("Error: {}", e);

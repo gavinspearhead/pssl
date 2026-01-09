@@ -19,6 +19,8 @@ pub mod tls_groups;
 pub mod tls_signature_hash_algorithms;
 pub mod util;
 pub mod version;
+pub mod ssl_quic;
+pub mod ssl_tcp;
 
 use crate::version::PROGNAME;
 use crate::version::VERSION;
@@ -56,20 +58,22 @@ use crate::packet_info::Packet_Info_List;
 use crate::packet_queue::Packet_Queue;
 use crate::ssl_packet::{parse_eth, TlsSupportedGroup};
 use crate::statistics::Statistics;
-use crate::tls_cipher_suites::TlsCipherSuite;
-use crate::tls_signature_hash_algorithms::TlsSignatureScheme;
+use crate::tls_cipher_suites::{TlsCipherSuite, TlsCipherSuiteValue};
+use crate::tls_signature_hash_algorithms::{TlsSignatureScheme, TlsSignatureSchemeValue};
 use crate::util::{load_asn_database, read_public_suffix_file};
 
 #[derive(
     Debug, Clone, PartialEq, Eq, EnumIter, EnumString, FromRepr, IntoStaticStr, Copy, Hash,
 )]
 pub enum TLS_Protocol {
-    TCP,
-    UDP,
+    TLS,
+    DTLS,
     QUIC,
 }
 
+
 impl TLS_Protocol {
+    #[must_use] 
     pub fn as_str(self) -> &'static str {
         self.into()
     }
@@ -123,9 +127,8 @@ fn parse_tls_packet(
             Some((mut packet, ts)) => {
                 let result =
                     parse_eth(&mut packet, packet_info_list, config, ts, &mut stats.lock());
-                match result {
-                    Err(error) => debug!("{error:?}"),
-                    Ok(()) => {}
+                if let Err(error) = result { 
+                    debug!("{error:?}"); 
                 }
             }
             None => {
@@ -170,18 +173,18 @@ fn poll(
                     (v.tls_client.done && v.tls_server.done)
                         || now > (v.q_timestamp.timestamp() + PACKET_LIST_TIMEOUT)
                 })
-                .map(|(k, _)| k.clone())
+                .map(|(k, _)| *k)
                 .collect();
 
             // Then remove them and act on the removed records
             for k in to_remove {
-                debug!("Removing {:?} from packet_info", k);
+                //debug!("Removing {:?} from packet_info", k);
 
                 if let Some(mut p1) = packet_info.packets.remove(&k) {
                     update_stats(&mut stats.lock(), &p1);
                     p1.update_asn(&asn_database);
                     p1.update_public_suffix(&publicsuffixlist);
-                    export_session(k, p1, config, &mut output_file, &mut database_conn);
+                    export_session(k, &p1, config, &mut output_file, &mut database_conn);
                 } else {
                     debug!("Terminating poll()");
                     return;
@@ -193,10 +196,10 @@ fn poll(
 
 fn update_stats(stats: &mut Statistics, packet_info: &Packet_info) {
     // ... existing code ...
-    match packet_info.protocol {
-        TLS_Protocol::TCP => stats.tls += 1,
+    match packet_info.tls_protocol {
+        TLS_Protocol::TLS => stats.tls += 1,
         TLS_Protocol::QUIC => stats.quic += 1,
-        TLS_Protocol::UDP => stats.dtls += 1,
+        TLS_Protocol::DTLS => stats.dtls += 1,
     }
     // ... existing code ...
     if packet_info.d_addr.is_ipv4() {
@@ -205,13 +208,13 @@ fn update_stats(stats: &mut Statistics, packet_info: &Packet_info) {
         stats.ipv6 += 1;
     }
 
-    if packet_info.tls_server.cipher != TlsCipherSuite::TLS_NULL_WITH_NULL_NULL {
+    if packet_info.tls_server.cipher != TlsCipherSuite::Known(TlsCipherSuiteValue::TLS_NULL_WITH_NULL_NULL) {
         *stats
             .ciphers
             .entry(packet_info.tls_server.cipher)
             .or_insert(0) += 1;
     }
-    if packet_info.tls_server.signature_algorithm != TlsSignatureScheme::Unknown {
+    if packet_info.tls_server.signature_algorithm != TlsSignatureScheme::Known(TlsSignatureSchemeValue::Unknown) {
         *stats
             .signature_algorithms
             .entry(packet_info.tls_server.signature_algorithm)
@@ -257,7 +260,9 @@ fn open_output_file(config: &Config) -> Option<File> {
 }
 
 fn connect_database(config: &Config) -> Option<Mysql_connection> {
-    if !config.database.is_empty() {
+    if config.database.is_empty() {
+        None
+    } else {
         Some(block_on(Mysql_connection::connect(
             &config.dbhostname,
             &config.dbusername,
@@ -265,8 +270,6 @@ fn connect_database(config: &Config) -> Option<Mysql_connection> {
             &config.dbport,
             &config.dbname,
         )))
-    } else {
-        None
     }
 }
 
@@ -287,16 +290,16 @@ fn is_valid_session(packet_info: &Packet_info) -> bool {
 
 fn export_session(
     key: (IpAddr, IpAddr, u16, u16),
-    packet_info: Packet_info,
+    packet_info: &Packet_info,
     config: &Config,
     output_file: &mut Option<File>,
     database_conn: &mut Option<Mysql_connection>,
 ) {
-    if !is_valid_session(&packet_info) {
-        debug!(
+    if !is_valid_session(packet_info) {
+        /*debug!(
             "Session {:?} is invalid or incomplete, skipping export",
             key
-        );
+        );*/
         return;
     }
 
@@ -313,7 +316,7 @@ fn export_session(
     }
 
     if let Some(ref mut db) = database_conn {
-        db.insert_or_update_record(&packet_info);
+        db.insert_or_update_record(packet_info);
     }
 
     if config.output == "-" {
@@ -374,10 +377,10 @@ fn cleanup_task(config: &Config) {
 
 fn stats_dump(config: &Config, statistics: &Arc<Mutex<Statistics>>) {
     if config.stats_dump_interval > 0 {
-        debug!(
+       /* debug!(
             "stats interval {} to file {}",
             config.stats_dump_interval, &config.export_stats
-        );
+        );*/
         loop {
             if let Err(e) = statistics.lock().dump_stats(config, false) {
                 error!("Cannot dump stats: {e}");
@@ -403,7 +406,7 @@ fn terminate_loop(stats: &Arc<Mutex<Statistics>>, config: &Arc<Config>) {
         debug!("Received signal: {:?}", sig);
 
         let s = stats.lock();
-        if let Err(e) = s.dump_stats(&config, true) {
+        if let Err(e) = s.dump_stats(config, true) {
             error!("Failed to dump stats on exit: {}", e);
         }
     }
@@ -428,11 +431,11 @@ fn capture_from_interface(
     let config_arc = Arc::new(config.clone());
 
     thread::scope(|s| {
-        let handle_poll = s.spawn(|| poll(&packet_queue, config, pq_rx, stats));
+        let handle_poll = s.spawn(|| poll(packet_queue, config, pq_rx, stats));
         let handle_http = s.spawn(|| {
-            let _ = listen(&stats, &config);
+            let _ = listen(stats, config);
         });
-        let handle_stats_dump = s.spawn(|| stats_dump(config, &stats));
+        let handle_stats_dump = s.spawn(|| stats_dump(config, stats));
         let handle_cleanup = s.spawn(|| cleanup_task(config));
         let handle_packet_loop = s.spawn(|| {
             packet_loop(&mut cap_in, packet_queue);
@@ -487,7 +490,7 @@ fn main() {
     }
     debug!("Config: {:?}", config);
     if !config.log_file.is_empty() {
-        debug!("Logging to {}", config.log_file);
+        //debug!("Logging to {}", config.log_file);
         let _ = reload_handle1.modify(|layers| {
             let file = match OpenOptions::new()
                 .append(true)

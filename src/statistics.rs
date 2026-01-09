@@ -25,6 +25,9 @@ pub(crate) struct Statistics {
     pub quic: u128,
     pub ipv6: u128,
     pub ipv4: u128,
+    pub tcp: u128,
+    pub udp: u128,
+    pub sctp: u128,
     #[serde(serialize_with = "ordered_map")]
     pub alpns: HashMap<String, u128>,
     #[serde(serialize_with = "ordered_map")]
@@ -68,6 +71,8 @@ impl Statistics {
     pub fn new(toplistsize: usize) -> Statistics {
         Statistics {
             ipv4: 0,
+            tcp: 0,
+            udp: 0,
             ipv6: 0,
             sources: Rank::new(toplistsize),
             destinations: Rank::new(toplistsize),
@@ -90,6 +95,7 @@ impl Statistics {
             ja4s: Rank::new(toplistsize),
             ja4c: Rank::new(toplistsize),
             alpns: HashMap::new(),
+            sctp: 0,
         }
     }
 
@@ -129,7 +135,7 @@ impl Statistics {
         let base = Path::new(&config.export_stats);
         if unique {
             let timestamp = Utc::now().to_rfc3339();
-            Ok(base.join(format!("stats-{}.json", timestamp)))
+            Ok(base.join(format!("stats-{timestamp}.json")))
         } else {
             let name = if config.compress_stats {
                 "stats.json.gz"

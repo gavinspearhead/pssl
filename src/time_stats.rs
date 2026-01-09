@@ -6,7 +6,7 @@ use tracing::debug;
 pub(crate) struct Bucket {
     last_post: usize,
     last_group: usize,
-    items: Vec<u64>,
+    items: Vec<u128>,
 }
 
 impl Bucket {
@@ -19,10 +19,10 @@ impl Bucket {
     }
 
     #[inline]
-    fn get_item(&self) -> &Vec<u64> {
+    fn get_item(&self) -> &Vec<u128> {
         self.items.as_ref()
     }
-    fn add(&mut self, position: u32, count: u64, group_val: u32) {
+    fn add(&mut self, position: u32, count: u128, group_val: u32) {
         let pos = position as usize;
         let len = self.items.len();
         if pos >= len {
@@ -120,7 +120,7 @@ impl Time_stats {
         }
     }
 
-    pub(crate) fn add(&mut self, time_stamp: DateTime<Utc>, count: u64) {
+    pub(crate) fn add(&mut self, time_stamp: DateTime<Utc>, count: u128) {
         let m = time_stamp.minute();
         let s = time_stamp.second();
         let h = time_stamp.hour();
@@ -134,7 +134,7 @@ impl Time_stats {
         self.per_second.add(s, count, m);
     }
 
-    pub(crate) fn get_item(&self, stat_item: &STAT_ITEM) -> &Vec<u64> {
+    pub(crate) fn get_item(&self, stat_item: &STAT_ITEM) -> &Vec<u128> {
         match stat_item {
             STAT_ITEM::MONTH => self.per_month.get_item(),
             STAT_ITEM::MINUTE => self.per_minute.get_item(),

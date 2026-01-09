@@ -10,6 +10,8 @@ use std::{
     fmt,
     net::{IpAddr, Ipv4Addr},
 };
+use serde::{Deserialize, Serialize};
+use tracing_rfc_5424::transport::Transport;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Packet_Info_List {
@@ -62,6 +64,14 @@ pub(crate) struct TLS_Server_data {
     pub done: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub(crate) enum Transport_Protocol {
+    #[default]
+    Tcp,
+    Udp,
+    Sctp,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Packet_info {
     pub timestamp: DateTime<Utc>,
@@ -70,7 +80,8 @@ pub(crate) struct Packet_info {
     pub dp: u16, // destination port
     pub s_addr: IpAddr,
     pub d_addr: IpAddr,
-    pub protocol: TLS_Protocol,
+    pub tls_protocol: TLS_Protocol,
+    pub transport_protocol: Transport_Protocol,
     pub initial_client_secret: Vec<u8>,
     pub initial_server_secret: Vec<u8>,
     pub tls_client: TLS_Client_data,
@@ -86,7 +97,8 @@ impl Default for Packet_info {
             dp: 0,
             s_addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             d_addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-            protocol: TLS_Protocol::TCP,
+            tls_protocol: TLS_Protocol::TLS,
+            transport_protocol: Transport_Protocol::Tcp,
             initial_client_secret: Vec::new(),
             initial_server_secret: Vec::new(),
             tls_client: TLS_Client_data::default(),
@@ -102,7 +114,8 @@ impl Packet_info {
         dp: u16, // destination port
         s_addr: IpAddr,
         d_addr: IpAddr,
-        tls_protocol: &TLS_Protocol,
+        tls_protocol: TLS_Protocol,
+        transport_protocol: Transport_Protocol
     ) -> Self {
         let mut p = Packet_info::default();
         p.s_addr = s_addr;
@@ -110,7 +123,8 @@ impl Packet_info {
         p.sp = sp;
         p.dp = dp;
         p.timestamp = timestamp;
-        p.protocol = tls_protocol.clone();
+        p.tls_protocol = tls_protocol;
+        p.transport_protocol = transport_protocol;
         p
     }
 
@@ -121,7 +135,7 @@ impl Packet_info {
         self.sp = port;
     }
     pub fn set_protocol(&mut self, protocol: TLS_Protocol) {
-        self.protocol = protocol;
+        self.tls_protocol = protocol;
     }
     pub fn set_dest_port(&mut self, port: u16) {
         self.dp = port;
@@ -184,7 +198,7 @@ impl fmt::Display for Packet_info {
             self.sp,
             self.d_addr,
             self.dp,
-            self.protocol.as_str(),
+            self.tls_protocol.as_str(),
             self.tls_server.version,
             self.tls_client.sni,
             self.tls_client.ja4c,

@@ -1,6 +1,9 @@
+use crate::ssl_helper::is_grease;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::fmt::Display;
 use strum_macros::{EnumIter, EnumString, FromRepr, IntoStaticStr};
+use tracing::debug;
 
 #[derive(
     EnumIter,
@@ -20,13 +23,19 @@ use strum_macros::{EnumIter, EnumString, FromRepr, IntoStaticStr};
     Ord,
 )]
 #[repr(u16)]
-pub enum TlsSignatureScheme {
+pub enum TlsSignatureSchemeValue {
     // --- Legacy (TLS 1.2) algorithms ---
     #[default]
     Unknown = 0x0000,
     RsaPkcs1Sha1 = 0x0201,
     EcdsaSha1 = 0x0203,
-
+    DsaSha1 = 0x0202,
+    RsaPkcs1Sha224 = 0x301,
+    DsaSha224 = 0x0302,
+    EcdsaSha224 = 0x303,
+    DsaSha256 = 0x0402,
+    DsaSha384 = 0x0502,
+    DsaSha512 = 0x0602,
     // --- SHA-2 based (TLS 1.2) ---
     RsaPkcs1Sha256 = 0x0401,
     EcdsaSecp256r1Sha256 = 0x0403,
@@ -101,18 +110,88 @@ pub enum TlsSignatureScheme {
     Falcon512 = 0xFE32,
     Falcon1024 = 0xFE33,
 }
+#[derive(Debug, PartialEq, Clone, Copy, Eq, Hash, PartialOrd, Ord)]
+pub enum TlsSignatureScheme {
+    Known(TlsSignatureSchemeValue),
+    Unknown(u16),
+    Grease,
+}
+
+impl Serialize for TlsSignatureScheme {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let value: Cow<'static, str> = match self {
+            TlsSignatureScheme::Known(known) => Cow::Borrowed(known.into()),
+            TlsSignatureScheme::Unknown(unknown) => Cow::Owned(format!("Unknown ({unknown:x})")),
+            TlsSignatureScheme::Grease => Cow::Borrowed("Grease"),
+        };
+        value.serialize(serializer)
+    }
+}
+ impl<'de> Deserialize<'de> for TlsSignatureScheme {
+        fn deserialize<D>(deserializer: D) -> Result<TlsSignatureScheme, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            let s = String::deserialize(deserializer)?;
+            if s == "Grease" {
+                return Ok(TlsSignatureScheme::Grease);
+            }
+
+            if let Ok(known) = s.parse::<TlsSignatureSchemeValue>() {
+                return Ok(TlsSignatureScheme::Known(known));
+            }
+
+            if s.starts_with("Unknown (") && s.ends_with(')') {
+                let hex_part = &s[9..s.len() - 1];
+                debug!("{hex_part}");
+                if let Ok(id) = u16::from_str_radix(hex_part, 16) {
+                    return Ok(TlsSignatureScheme::Unknown(id));
+                }
+            }
+
+            Ok(TlsSignatureScheme::Unknown(0))
+        }
+    }
+
+impl Default for TlsSignatureScheme {
+    fn default() -> Self {
+        TlsSignatureScheme::Known(TlsSignatureSchemeValue::Unknown)
+    }
+}
 
 impl TlsSignatureScheme {
+    #[must_use] 
     pub fn from_u16(id: u16) -> Option<Self> {
-        Self::from_repr(id)
+        if is_grease(id) {
+            Some(TlsSignatureScheme::Grease)
+        } else {
+            match TlsSignatureSchemeValue::from_repr(id) {
+                Some(known) => Some(TlsSignatureScheme::Known(known)),
+                None => Some(TlsSignatureScheme::Unknown(id)),
+            }
+        }
     }
 
+    #[must_use] 
     pub fn to_u16(self) -> u16 {
-        self as u16
+        match self {
+            TlsSignatureScheme::Known(known) => known as u16,
+            TlsSignatureScheme::Unknown(unknown) => unknown,
+            TlsSignatureScheme::Grease => 0x0a0a,
+        }
     }
 
-    pub fn as_str(self) -> &'static str {
-        self.into()
+    #[must_use] 
+    pub fn as_str(self) -> String {
+        match self {
+            TlsSignatureScheme::Known(known) => Cow::Borrowed(known.into()),
+            TlsSignatureScheme::Unknown(val) => Cow::Owned(format!("Unknown ({val:x})")),
+            TlsSignatureScheme::Grease => Cow::Borrowed("Grease"),
+        }
+        .into_owned()
     }
 }
 impl Display for TlsSignatureScheme {
