@@ -120,9 +120,10 @@ impl Mysql_connection {
     }
     pub fn create_database(&mut self) {
         let create_cmd1 = r"
+        CREATE TABLE `pssl_client` (
   `id` bigint(20) NOT NULL AUTO_INCREMENT,
   `ip` varchar(64) DEFAULT NULL,
-  'protocol' varchar(16) DEFAULT NULL,
+  `protocol` varchar(16) DEFAULT NULL,
   `version` varchar(16) DEFAULT NULL,
   `ja4c` varchar(256) DEFAULT NULL,
   `last_seen` datetime DEFAULT NULL,
@@ -148,7 +149,7 @@ impl Mysql_connection {
   `id` bigint(20) NOT NULL AUTO_INCREMENT,
   `ip` varchar(64) DEFAULT NULL,
   `port` int(11) DEFAULT NULL,
-  'protocol' varchar(16) DEFAULT NULL,
+  `protocol` varchar(16) DEFAULT NULL,
   `host` varchar(255) DEFAULT NULL,
   `version` varchar(16) DEFAULT NULL,
   `cipher` varchar(256) DEFAULT NULL,

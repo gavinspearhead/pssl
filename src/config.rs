@@ -85,7 +85,7 @@ impl Config {
     }
 }
 
-pub(crate) fn parse_config(config: &mut Config, pcap_path: &mut String, create_db: &mut bool) {
+pub(crate) fn parse_config(config: &mut Config, pcap_path: &mut String) {
     let matches = Command::new(PROGNAME)
         .version(VERSION)
         .author(AUTHOR)
@@ -253,7 +253,7 @@ pub(crate) fn parse_config(config: &mut Config, pcap_path: &mut String, create_d
         }
     }
 
-    *create_db = *matches.get_one::<bool>("create_database").unwrap_or(&false);
+    config.create_db = *matches.get_one::<bool>("create_database").unwrap_or(&false);
 
     config.http_server = matches
         .get_one::<String>("listen")

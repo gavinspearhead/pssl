@@ -482,8 +482,7 @@ fn main() {
         .with(tracing_layers)
         .init();
 
-    let mut create_db: bool = false;
-    parse_config(&mut config, &mut pcap_path, &mut create_db);
+    parse_config(&mut config, &mut pcap_path);
 
     if config.debug {
         let _ = reload_handle.modify(|filter| *filter = filter::LevelFilter::DEBUG);
