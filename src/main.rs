@@ -5,12 +5,17 @@ pub mod config;
 pub mod errors;
 pub mod http_server;
 pub mod ja4;
+pub mod live_dump;
 pub mod mysql_connection;
 pub mod packet_info;
 pub mod packet_queue;
 pub mod rank;
+pub mod ssl_dtls;
 pub mod ssl_helper;
 pub mod ssl_packet;
+pub mod ssl_quic;
+pub mod ssl_tcp;
+pub mod ssl_tls;
 pub mod statistics;
 pub mod time_stats;
 pub mod tls_cipher_suites;
@@ -19,8 +24,8 @@ pub mod tls_groups;
 pub mod tls_signature_hash_algorithms;
 pub mod util;
 pub mod version;
-pub mod ssl_quic;
-pub mod ssl_tcp;
+mod tls_content_type;
+mod tls_handshake_types;
 
 use crate::version::PROGNAME;
 use crate::version::VERSION;
@@ -33,6 +38,7 @@ use mysql_connection::Mysql_connection;
 use packet_info::Packet_info;
 use parking_lot::Mutex;
 use pcap::{Activated, Active, Capture, Linktype};
+use serde::{Deserialize, Serialize};
 use signal_hook::iterator::Signals;
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -43,7 +49,7 @@ use std::str::{self, FromStr};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use strum_macros::{EnumIter, EnumString, FromRepr, IntoStaticStr};
 use tracing::{debug, error};
 use tracing_rfc_5424::layer::Layer;
@@ -53,8 +59,9 @@ use tracing_subscriber::{filter, fmt, prelude::*, reload}; // Needed to get `wit
 
 use crate::config::Config;
 use crate::http_server::listen;
+use crate::live_dump::Live_dump;
 use crate::mysql_connection::create_database;
-use crate::packet_info::Packet_Info_List;
+use crate::packet_info::{Packet_Info_List, Transport_Protocol};
 use crate::packet_queue::Packet_Queue;
 use crate::ssl_packet::{parse_eth, TlsSupportedGroup};
 use crate::statistics::Statistics;
@@ -63,7 +70,20 @@ use crate::tls_signature_hash_algorithms::{TlsSignatureScheme, TlsSignatureSchem
 use crate::util::{load_asn_database, read_public_suffix_file};
 
 #[derive(
-    Debug, Clone, PartialEq, Eq, EnumIter, EnumString, FromRepr, IntoStaticStr, Copy, Hash,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    EnumIter,
+    EnumString,
+    FromRepr,
+    IntoStaticStr,
+    Copy,
+    Hash,
+    Ord,
+    PartialOrd,
+    Serialize,
+    Deserialize,
 )]
 pub enum TLS_Protocol {
     TLS,
@@ -71,9 +91,8 @@ pub enum TLS_Protocol {
     QUIC,
 }
 
-
 impl TLS_Protocol {
-    #[must_use] 
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         self.into()
     }
@@ -101,7 +120,7 @@ fn packet_loop<T: Activated + 'static>(cap: &mut Capture<T>, packet_queue: &Pack
                     packet.header.ts.tv_usec as u32 * 1000,
                 )
                 .unwrap_or_else(Utc::now);
-                packet_queue.push_back(Some((packet.data.to_vec(), ts)));
+                packet_queue.push_back(Some((packet.data.to_owned(), ts)));
             }
             Err(pcap::Error::TimeoutExpired) => {
                 debug!("Packet capture error: {}", pcap::Error::TimeoutExpired);
@@ -118,7 +137,6 @@ fn packet_loop<T: Activated + 'static>(cap: &mut Capture<T>, packet_queue: &Pack
 fn parse_tls_packet(
     packet_queue: &Packet_Queue,
     stats: &Arc<Mutex<Statistics>>,
-    // tcp_list: &Arc<Mutex<TCP_Connections>>,
     config: &Config,
     packet_info_list: &mut Packet_Info_List,
 ) -> bool {
@@ -127,8 +145,9 @@ fn parse_tls_packet(
             Some((mut packet, ts)) => {
                 let result =
                     parse_eth(&mut packet, packet_info_list, config, ts, &mut stats.lock());
-                if let Err(error) = result { 
-                    debug!("{error:?}"); 
+                if let Err(error) = result {
+                    debug!("{error:?}");
+                    stats.lock().errors += 1;
                 }
             }
             None => {
@@ -141,7 +160,7 @@ fn parse_tls_packet(
     true
 }
 
-const PACKET_LIST_TIMEOUT: i64 = 6000;
+const PACKET_LIST_TIMEOUT: i64 = 5;
 
 fn poll(
     packet_queue: &Packet_Queue,
@@ -154,24 +173,26 @@ fn poll(
     let mut database_conn = connect_database(config);
     let asn_database = load_asn_database(config);
     let publicsuffixlist: publicsuffix::List = read_public_suffix_file(&config.public_suffix_file);
-    let mut last_cleanup = Utc::now().timestamp();
+    let mut last_cleanup = Instant::now();
+    let mut live_dump = Live_dump::new(&config.live_dump_host, config.live_dump_port);
 
     let mut packet_info = Packet_Info_List::new();
     loop {
+        live_dump.accept();
+        live_dump.read_all();
         let _res = parse_tls_packet(packet_queue, stats, config, &mut packet_info);
         /*  if !packet_info.packets.is_empty() {
             debug!("parse_tls_packet returned {:?} packets", packet_info.packets );
         }*/
-        let now = Utc::now().timestamp();
-        if now - last_cleanup >= 1 {
+        let now = Instant::now();
+        if now - last_cleanup >= Duration::from_millis(500) {
             last_cleanup = now;
-
             let to_remove: Vec<(IpAddr, IpAddr, u16, u16)> = packet_info
                 .packets
                 .iter()
                 .filter(|(_, v)| {
                     (v.tls_client.done && v.tls_server.done)
-                        || now > (v.q_timestamp.timestamp() + PACKET_LIST_TIMEOUT)
+                        || now.elapsed() > Duration::from_secs(v.q_timestamp.timestamp() as u64 + PACKET_LIST_TIMEOUT as u64)
                 })
                 .map(|(k, _)| *k)
                 .collect();
@@ -184,7 +205,8 @@ fn poll(
                     update_stats(&mut stats.lock(), &p1);
                     p1.update_asn(&asn_database);
                     p1.update_public_suffix(&publicsuffixlist);
-                    export_session(k, &p1, config, &mut output_file, &mut database_conn);
+                    export_session(&p1, config, &mut output_file, &mut database_conn);
+                    live_dump.write_all(&p1);
                 } else {
                     debug!("Terminating poll()");
                     return;
@@ -201,29 +223,38 @@ fn update_stats(stats: &mut Statistics, packet_info: &Packet_info) {
         TLS_Protocol::QUIC => stats.quic += 1,
         TLS_Protocol::DTLS => stats.dtls += 1,
     }
-    // ... existing code ...
     if packet_info.d_addr.is_ipv4() {
         stats.ipv4 += 1;
     } else {
         stats.ipv6 += 1;
     }
 
-    if packet_info.tls_server.cipher != TlsCipherSuite::Known(TlsCipherSuiteValue::TLS_NULL_WITH_NULL_NULL) {
+    match packet_info.transport_protocol {
+        Transport_Protocol::Udp => stats.udp += 1,
+        Transport_Protocol::Tcp => stats.tcp += 1,
+        Transport_Protocol::Sctp => stats.sctp += 1,
+    }
+
+    if packet_info.tls_server.cipher
+        != TlsCipherSuite::Known(TlsCipherSuiteValue::TLS_NULL_WITH_NULL_NULL)
+    {
         *stats
             .ciphers
             .entry(packet_info.tls_server.cipher)
             .or_insert(0) += 1;
     }
-    if packet_info.tls_server.signature_algorithm != TlsSignatureScheme::Known(TlsSignatureSchemeValue::Unknown) {
+    if packet_info.tls_server.signature_algorithm
+        != TlsSignatureScheme::Known(TlsSignatureSchemeValue::Unknown)
+    {
         *stats
             .signature_algorithms
             .entry(packet_info.tls_server.signature_algorithm)
             .or_insert(0) += 1;
     }
-    if packet_info.tls_server.group != TlsSupportedGroup::default() {
+    if packet_info.tls_server.curve != TlsSupportedGroup::default() {
         *stats
             .curves
-            .entry(packet_info.tls_server.group)
+            .entry(packet_info.tls_server.curve)
             .or_insert(0) += 1;
     }
 
@@ -289,17 +320,12 @@ fn is_valid_session(packet_info: &Packet_info) -> bool {
 }
 
 fn export_session(
-    key: (IpAddr, IpAddr, u16, u16),
     packet_info: &Packet_info,
     config: &Config,
     output_file: &mut Option<File>,
     database_conn: &mut Option<Mysql_connection>,
 ) {
     if !is_valid_session(packet_info) {
-        /*debug!(
-            "Session {:?} is invalid or incomplete, skipping export",
-            key
-        );*/
         return;
     }
 
@@ -377,7 +403,7 @@ fn cleanup_task(config: &Config) {
 
 fn stats_dump(config: &Config, statistics: &Arc<Mutex<Statistics>>) {
     if config.stats_dump_interval > 0 {
-       /* debug!(
+        /* debug!(
             "stats interval {} to file {}",
             config.stats_dump_interval, &config.export_stats
         );*/
@@ -385,7 +411,7 @@ fn stats_dump(config: &Config, statistics: &Arc<Mutex<Statistics>>) {
             if let Err(e) = statistics.lock().dump_stats(config, false) {
                 error!("Cannot dump stats: {e}");
             }
-            sleep(Duration::from_secs(config.stats_dump_interval as u64));
+            sleep(Duration::from_secs(u64::from(config.stats_dump_interval)));
         }
     }
 }

@@ -1,10 +1,10 @@
-use clap::{arg, ArgAction, Command};
-use std::str::FromStr;
-
 use crate::version::{AUTHOR, DESCRIPTION, PROGNAME, VERSION};
+use clap::{arg, value_parser, ArgAction, Command};
+use std::process::exit;
+use tracing::error;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct Config {
+pub struct Config {
     pub interface: String,
     pub filter: String,
     pub output: String,
@@ -37,13 +37,16 @@ pub(crate) struct Config {
     pub compress_stats: bool,
     pub export_stats: String,
     pub import_stats: String,
-    pub ports: Vec<u16>,
+    pub tls_ports: Vec<u16>,
+    pub quic_ports: Vec<u16>,
+    pub dtls_ports: Vec<u16>,
+    pub tls: bool,
+    pub quic: bool,
+    pub dtls: bool,
 }
 
 impl Config {
     pub(crate) fn new() -> Config {
-
-
         Config {
             interface: String::new(),
             filter: String::new(),
@@ -77,7 +80,12 @@ impl Config {
             create_db: false,
             export_stats: String::new(),
             import_stats: String::new(),
-            ports: vec![443],
+            tls_ports: vec![443],
+            quic_ports: vec![443],
+            dtls_ports: vec![4433],
+            tls: true,
+            quic: true,
+            dtls: false,
         }
     }
     pub(crate) fn from_str(config_str: &str) -> Result<Config, serde_json::Error> {
@@ -105,6 +113,7 @@ pub(crate) fn parse_config(config: &mut Config, pcap_path: &mut String) {
         .arg(
             arg!(-T --dbport <VALUE>)
                 .required(false)
+                .value_parser(value_parser!(u16))
                 .long_help("port number of the database"),
         )
         .arg(
@@ -125,11 +134,12 @@ pub(crate) fn parse_config(config: &mut Config, pcap_path: &mut String) {
         .arg(
             arg!(-l --listen <VALUE>)
                 .required(false)
-                .long_help("Hostname or IP address for the internal web server to liste no"),
+                .long_help("Hostname or IP address for the internal web server to listen to"),
         )
         .arg(
             arg!(-P --port <VALUE>)
                 .required(false)
+                .value_parser(value_parser!(u16))
                 .long_help("Port number for the internal web server to listen on (0 to disable)"),
         )
         .arg(
@@ -160,6 +170,7 @@ pub(crate) fn parse_config(config: &mut Config, pcap_path: &mut String) {
         .arg(
             arg!(-L --toplistsize <VALUE>)
                 .required(false)
+                .value_parser(value_parser!(usize))
                 .long_help("Number of entries in the statistics"),
         )
         .arg(
@@ -194,9 +205,48 @@ pub(crate) fn parse_config(config: &mut Config, pcap_path: &mut String) {
                 .required(false)
                 .action(ArgAction::SetTrue)
                 .long_help("Put the interface is promiscuous mode when capturing"),
+        ).arg(
+        arg!(--quic)
+            .required(false)
+            .overrides_with("noquic")
+            .action(ArgAction::SetTrue)
+            .long_help("Parse QUIC traffic"),
+    )
+        .arg(
+            arg!(--tls)
+                .required(false)
+                .overrides_with("notls")
+                .action(ArgAction::SetTrue)
+                .long_help("Parse TLS traffic"),
         )
         .arg(
-            arg!(-D - -daemon)
+            arg!(--dtls)
+                .required(false)
+                .overrides_with("nodtls")
+                .action(ArgAction::SetTrue)
+                .long_help("Parse DTLS traffic"),
+        ).arg(
+        arg!(--noquic)
+            .required(false)
+            .overrides_with("quic")
+            .action(ArgAction::SetTrue)
+            .long_help("Do not Parse QUIC traffic"),
+
+    ).arg(
+        arg!(--notls)
+            .required(false)
+            .overrides_with("tls")
+            .action(ArgAction::SetTrue)
+            .long_help("Parse TLS traffic"),
+    ) .arg(
+        arg!(--nodtls)
+            .required(false)
+            .overrides_with("dtls")
+            .action(ArgAction::SetTrue)
+            .long_help("Parse DTLS traffic"),
+    )
+        .arg(
+            arg!(-D --daemon)
                 .required(false)
                 .action(ArgAction::SetTrue)
                 .long_help("Start as a background process (daemon)"),
@@ -216,27 +266,46 @@ pub(crate) fn parse_config(config: &mut Config, pcap_path: &mut String) {
         .arg(
             arg!(--live_dump_host <VALUE>)
                 .required(false)
-                .long_help("Hostname or IP address for the live dump to liste to"),
+                .long_help("Hostname or IP address for the live dump to listen to"),
         )
         .arg(
             arg!(--live_dump_port <VALUE>)
                 .required(false)
+                .value_parser(value_parser!(u16))
                 .long_help("Port number for the live dump to listen on (0 to disable)"),
         )
         .arg(
-                arg!(-M --import_stats <VALUE>)
-                    .required(false)
-                    .default_missing_value("")
-                    .long_help("Import stats from json file"),
+            arg!(-M --import_stats <VALUE>)
+                .required(false)
+                .default_missing_value("")
+                .long_help("Import stats from json file"),
         )
-        .arg(arg!(--ports <VALUE>).required(false).long_help(
-            "Port numbers to listen on for packet capture, comma separated (default 443)",
-        ))
+        .arg(arg!(--tls_ports <VALUE>).required(false)
+            .value_delimiter(',')
+            .num_args(1..)
+            .value_parser(value_parser!(u16))
+            .long_help(
+                "TLS Port numbers to listen on for packet capture, comma separated (default 443)",
+            ))
+        .arg(arg!(--quic_ports <VALUE>).required(false)
+            .value_delimiter(',')
+            .num_args(1..)
+            .value_parser(value_parser!(u16))
+            .long_help(
+                "QUIC Port numbers to listen on for packet capture, comma separated (default 443)",
+            ))
+        .arg(arg!(--dtls_ports <VALUE>).required(false)
+            .value_delimiter(',')
+            .num_args(1..)
+            .value_parser(value_parser!(u16))
+            .long_help(
+                "DTLS Port numbers to listen on for packet capture, comma separated (default 443)",
+            ))
         .get_matches();
     let empty_str = String::new();
-    config.config_file.clone_from(matches
-        .get_one::<String>("config")
-        .unwrap_or(&String::from_str(&empty_str).unwrap()));
+    config
+        .config_file
+        .clone_from(matches.get_one::<String>("config").unwrap_or(&empty_str));
     if !config.config_file.is_empty() {
         let config_str = std::fs::read_to_string(&config.config_file).unwrap_or_default();
         if !config_str.is_empty() {
@@ -247,7 +316,8 @@ pub(crate) fn parse_config(config: &mut Config, pcap_path: &mut String) {
                 Err(e) => {
                     let err_msg =
                         format!("Failed to parse config file: {} {}", config.config_file, e);
-                    panic!("{err_msg}");
+                    error!("{err_msg}");
+                    exit(-1);
                 }
             }
         }
@@ -293,6 +363,24 @@ pub(crate) fn parse_config(config: &mut Config, pcap_path: &mut String) {
         .get_one::<String>("database")
         .unwrap_or(&config.database)
         .clone();
+    if matches.get_flag("tls") {
+        config.tls = true;
+    } else if matches.get_flag("notls") {
+        config.tls = false;
+    }
+
+    if matches.get_flag("dtls") {
+        config.dtls = true;
+    } else if matches.get_flag("nodtls") {
+        config.dtls = false;
+    }
+
+    if matches.get_flag("quic") {
+        config.quic = true;
+    } else if matches.get_flag("noquic") {
+        config.quic = false;
+    }
+
     config.daemon = *matches.get_one::<bool>("daemon").unwrap_or(&config.daemon);
     config.debug = *matches.get_one::<bool>("debug").unwrap_or(&config.debug);
     config.promisc = *matches
@@ -325,4 +413,28 @@ pub(crate) fn parse_config(config: &mut Config, pcap_path: &mut String) {
     config.live_dump_port = *matches
         .get_one::<u16>("live_dump_port")
         .unwrap_or(&config.live_dump_port);
+    let tls_ports: Vec<u16> = matches
+        .get_many::<u16>("tls_ports")
+        .unwrap_or_default() // Returns an empty iterator if arg is missing
+        .copied() // &u16 -> u16
+        .collect();
+    if !tls_ports.is_empty() {
+        config.tls_ports = tls_ports;
+    }
+    let quic_ports: Vec<u16> = matches
+        .get_many::<u16>("quic_ports")
+        .unwrap_or_default() // Returns an empty iterator if arg is missing
+        .copied() // &u16 -> u16
+        .collect();
+    if !quic_ports.is_empty() {
+        config.quic_ports = quic_ports;
+    }
+    let dtls_ports: Vec<u16> = matches
+        .get_many::<u16>("dtls_ports")
+        .unwrap_or_default() // Returns an empty iterator if arg is missing
+        .copied() // &u16 -> u16
+        .collect();
+    if !dtls_ports.is_empty() {
+        config.dtls_ports = dtls_ports;
+    }
 }

@@ -2,7 +2,6 @@ use crate::rank::Rank;
 use crate::util::ordered_map;
 use serde::{Deserialize, Serialize};
 use serde_json;
-use serde_with::rust::deserialize_ignore_any;
 
 use crate::config::Config;
 use crate::ssl_packet::TlsSupportedGroup;
@@ -19,7 +18,9 @@ use std::{fs::File, io::BufReader};
 use tracing::debug;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub(crate) struct Statistics {
+#[serde(default)]
+pub struct Statistics {
+    pub errors: u128,
     pub dtls: u128,
     pub tls: u128,
     pub quic: u128,
@@ -49,27 +50,29 @@ pub(crate) struct Statistics {
     #[serde(serialize_with = "ordered_map")]
     pub client_signature_algorithms: HashMap<TlsSignatureScheme, u128>,
 
-    #[serde(deserialize_with = "deserialize_ignore_any")]
+    //#[serde(deserialize_with = "deserialize_ignore_any")]
     pub sources: Rank<IpAddr>,
-    #[serde(deserialize_with = "deserialize_ignore_any")]
+    //#[serde(deserialize_with = "deserialize_ignore_any")]
     pub destinations: Rank<IpAddr>,
-    #[serde(deserialize_with = "deserialize_ignore_any")]
+    // #[serde(deserialize_with = "deserialize_ignore_any")]
     pub ja3c: Rank<String>,
-    #[serde(deserialize_with = "deserialize_ignore_any")]
+    //  #[serde(deserialize_with = "deserialize_ignore_any")]
     pub ja3s: Rank<String>,
-    #[serde(deserialize_with = "deserialize_ignore_any")]
+    // #[serde(deserialize_with = "deserialize_ignore_any")]
     pub ja4c: Rank<String>,
-    #[serde(deserialize_with = "deserialize_ignore_any")]
+    // #[serde(deserialize_with = "deserialize_ignore_any")]
     pub ja4s: Rank<String>,
-    #[serde(deserialize_with = "deserialize_ignore_any")]
+    // #[serde(deserialize_with = "deserialize_ignore_any")]
     pub client_extensions: HashMap<TlsExtensionType, u128>,
-    #[serde(deserialize_with = "deserialize_ignore_any")]
+    // #[serde(deserialize_with = "deserialize_ignore_any")]
     pub server_extensions: HashMap<TlsExtensionType, u128>,
 }
 
 impl Statistics {
+    #[must_use]
     pub fn new(toplistsize: usize) -> Statistics {
         Statistics {
+            errors: 0,
             ipv4: 0,
             tcp: 0,
             udp: 0,
@@ -90,11 +93,11 @@ impl Statistics {
             client_tls_versions: HashMap::new(),
             server_extensions: HashMap::new(),
             client_extensions: HashMap::new(),
+            alpns: HashMap::new(),
             ja3s: Rank::new(toplistsize),
             ja3c: Rank::new(toplistsize),
             ja4s: Rank::new(toplistsize),
             ja4c: Rank::new(toplistsize),
-            alpns: HashMap::new(),
             sctp: 0,
         }
     }
@@ -106,8 +109,13 @@ impl Statistics {
         let file = File::open(filename)?;
         let reader = BufReader::new(file);
         let mut statistics: Statistics = serde_json::from_reader(reader)?;
-        statistics.sources = Rank::new(toplistsize);
-        statistics.destinations = Rank::new(toplistsize);
+        statistics.sources.set_size(toplistsize);
+        statistics.destinations.set_size(toplistsize);
+        statistics.ja3s.set_size(toplistsize);
+        statistics.ja3c.set_size(toplistsize);
+        statistics.ja4s.set_size(toplistsize);
+        statistics.ja4c.set_size(toplistsize);
+
         Ok(statistics)
     }
 
@@ -135,7 +143,10 @@ impl Statistics {
         let base = Path::new(&config.export_stats);
         if unique {
             let timestamp = Utc::now().to_rfc3339();
-            Ok(base.join(format!("stats-{timestamp}.json")))
+            Ok(base.join(format!(
+                "stats-{timestamp}.json{}",
+                if config.compress_stats { ".gz" } else { "" }
+            )))
         } else {
             let name = if config.compress_stats {
                 "stats.json.gz"
@@ -162,8 +173,7 @@ impl Statistics {
         };
 
         let mut buffered_writer = BufWriter::new(writer);
-        serde_json::to_writer_pretty(&mut buffered_writer, self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        serde_json::to_writer_pretty(&mut buffered_writer, self).map_err(std::io::Error::other)?;
         buffered_writer.flush()
     }
 }

@@ -11,6 +11,7 @@ pub(crate) enum ParseErrorType {
     Invalid_TCP_Packet,
     Invalid_UDP_Packet,
     Invalid_IP_Version,
+    Invalid_Eth_Type,
     Packet_Too_Small,
     Unknown_Packet_Type,
     Unknown_Link_Type,
@@ -54,6 +55,7 @@ impl Parse_error {
             ParseErrorType::Invalid_TLS_Packet => "Invalid TLS packet",
             ParseErrorType::Invalid_Parameter => "Invalid Parameter",
             ParseErrorType::Invalid_Domain_name => "Invalid domain name",
+            ParseErrorType::Invalid_Eth_Type => "Invalid Ethernet type",
         };
         Parse_error {
             error_type: err_t,
@@ -70,7 +72,7 @@ impl fmt::Display for Parse_error {
 }
 
 impl Error for Parse_error {
-    fn description(&self) -> &str {
+    /*fn description(&self) -> &str {
         &self.error_str
-    }
+    }*/
 }

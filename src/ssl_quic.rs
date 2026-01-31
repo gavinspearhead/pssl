@@ -2,7 +2,10 @@ use crate::config::Config;
 use crate::errors::ParseErrorType::Invalid_TLS_Packet;
 use crate::errors::Parse_error;
 use crate::packet_info::{Packet_Info_List, Packet_info, Transport_Protocol};
-use crate::ssl_helper::{ssl_parse_slice, ssl_parse_slice_mut, ssl_read_u16, ssl_read_u24, ssl_read_u32, ssl_read_u8};
+use crate::ssl_helper::{
+    ssl_parse_slice, ssl_parse_slice_mut, ssl_read_u16, ssl_read_u24, ssl_read_u32, ssl_read_u8,
+};
+use crate::ssl_tls::parse_tls_handshake;
 use crate::statistics::Statistics;
 use crate::TLS_Protocol;
 use aes::Aes128;
@@ -14,14 +17,89 @@ use hkdf::Hkdf;
 use sha2::Sha256;
 use std::error::Error;
 use std::net::IpAddr;
-use tracing::debug;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u64)]
+enum QuicFrameType {
+    Padding = 0x00,
+    Ping = 0x01,
+    Ack = 0x02,
+    AckEcn = 0x03,
+    ResetStream = 0x04,
+    StopSending = 0x05,
+    Crypto = 0x06,
+    NewToken = 0x07,
+
+    /// STREAM frames are actually the range 0x08..=0x0f (flags in low bits).
+    /// We map all of them to this variant; keep the raw type around if you need flags.
+    Stream = 0x08,
+
+    MaxData = 0x10,
+    MaxStreamData = 0x11,
+    MaxStreamsBidi = 0x12,
+    MaxStreamsUni = 0x13,
+    DataBlocked = 0x14,
+    StreamDataBlocked = 0x15,
+    StreamsBlockedBidi = 0x16,
+    StreamsBlockedUni = 0x17,
+    NewConnectionId = 0x18,
+    RetireConnectionId = 0x19,
+    PathChallenge = 0x1a,
+    PathResponse = 0x1b,
+    ConnectionCloseTransport = 0x1c,
+    ConnectionCloseApplication = 0x1d,
+    HandshakeDone = 0x1e,
+
+    // RFC 9221 (extension): Datagram frames
+    Datagram = 0x30,
+    DatagramWithLen = 0x31,
+}
+
+impl QuicFrameType {
+    #[inline]
+    fn from_u64(v: u64) -> Option<Self> {
+        match v {
+            0x00 => Some(Self::Padding),
+            0x01 => Some(Self::Ping),
+            0x02 => Some(Self::Ack),
+            0x03 => Some(Self::AckEcn),
+            0x04 => Some(Self::ResetStream),
+            0x05 => Some(Self::StopSending),
+            0x06 => Some(Self::Crypto),
+            0x07 => Some(Self::NewToken),
+
+            0x08..=0x0f => Some(Self::Stream),
+
+            0x10 => Some(Self::MaxData),
+            0x11 => Some(Self::MaxStreamData),
+            0x12 => Some(Self::MaxStreamsBidi),
+            0x13 => Some(Self::MaxStreamsUni),
+            0x14 => Some(Self::DataBlocked),
+            0x15 => Some(Self::StreamDataBlocked),
+            0x16 => Some(Self::StreamsBlockedBidi),
+            0x17 => Some(Self::StreamsBlockedUni),
+            0x18 => Some(Self::NewConnectionId),
+            0x19 => Some(Self::RetireConnectionId),
+            0x1a => Some(Self::PathChallenge),
+            0x1b => Some(Self::PathResponse),
+            0x1c => Some(Self::ConnectionCloseTransport),
+            0x1d => Some(Self::ConnectionCloseApplication),
+            0x1e => Some(Self::HandshakeDone),
+
+            0x30 => Some(Self::Datagram),
+            0x31 => Some(Self::DatagramWithLen),
+
+            _ => None,
+        }
+    }
+}
 
 const QUIC_V1_SALT: [u8; 20] = [
     0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17, 0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad,
     0xcc, 0xbb, 0x7f, 0x0a,
 ];
 
-fn hkdf_expand_label(secret: &[u8], label: &str, length: usize) -> Result<Vec<u8>, Parse_error> {
+fn hkdf_expand_label(secret: &[u8], label: &str, length: u16) -> Result<Vec<u8>, Box<dyn Error>> {
     let hk = Hkdf::<Sha256>::from_prk(secret)
         .map_err(|_| Parse_error::new(Invalid_TLS_Packet, "Invalid PRK length for SHA256"))?;
     // 1. Build the "tls13 " prefixed label
@@ -30,12 +108,12 @@ fn hkdf_expand_label(secret: &[u8], label: &str, length: usize) -> Result<Vec<u8
     // 2. Construct the 'info' byte sequence:
     // [2 bytes: length] [1 byte: label_length] [label] [1 byte: 0x00 (context length)]
     let mut info = Vec::new();
-    info.extend_from_slice(&(length as u16).to_be_bytes()); // Output length (big-endian)
-    info.push(full_label.len() as u8); // Label length
+    info.extend_from_slice(&length.to_be_bytes()); // Output length (big-endian)
+    info.push(u8::try_from(full_label.len())?); // Label length
     info.extend_from_slice(full_label.as_bytes()); // The label itself
     info.push(0); // Context length (always 0)
 
-    let mut okm = vec![0u8; length];
+    let mut okm = vec![0u8; length as usize];
     hk.expand(&info, &mut okm)
         .map_err(|_| Parse_error::new(Invalid_TLS_Packet, "HKDF expansion failed"))?;
     Ok(okm)
@@ -133,7 +211,7 @@ struct PacketKeys {
     iv: [u8; 12],
 }
 
-fn derive_packet_keys(secret: &[u8]) -> Result<PacketKeys, Parse_error> {
+fn derive_packet_keys(secret: &[u8]) -> Result<PacketKeys, Box<dyn Error>> {
     Ok(PacketKeys {
         hp: hkdf_expand_label(secret, "quic hp", 16)?
             .try_into()
@@ -194,7 +272,7 @@ fn parse_varint(buf: &[u8], offset: usize) -> Result<(u64, usize), Parse_error> 
         Parse_error::new(
             Invalid_TLS_Packet,
             &format!(
-                "Offset {} out of bounds for buffer length {offset}",
+                "Offset {offset} out of bounds for buffer length {}",
                 buf.len()
             ),
         )
@@ -213,7 +291,9 @@ fn parse_varint(buf: &[u8], offset: usize) -> Result<(u64, usize), Parse_error> 
         0b01 => 2,
         0b10 => 4,
         0b11 => 8,
-        _ => unreachable!(),
+        _ => {
+            return Err(Parse_error::new(Invalid_TLS_Packet, "Invalid varint size"));
+        }
     };
 
     if remaining.len() < len {
@@ -263,6 +343,13 @@ fn decrypt_quic_payload(
     for i in 0..8 {
         nonce_bytes[4 + i] ^= pn_bytes[i];
     }
+    if ciphertext.len() < 16 {
+        return Err(Parse_error::new(
+            Invalid_TLS_Packet,
+            "Ciphertext too short to contain authentication tag",
+        )
+        .into());
+    }
     let nonce = GenericArray::from_slice(&nonce_bytes);
     let tag_pos = ciphertext.len().saturating_sub(16);
     let (data, tag) = ciphertext.split_at_mut(tag_pos);
@@ -290,7 +377,7 @@ fn skip_varint(buf: &[u8], pos: usize) -> Option<usize> {
     }
 }
 
-fn parse_ack_frame(buf: &[u8], pos_in: usize) -> Result<usize, Parse_error> {
+fn parse_ack_frame(buf: &[u8], pos_in: usize) -> Result<usize, Box<dyn Error>> {
     let mut pos = pos_in;
     let (_, len) = parse_varint(buf, pos)?;
     pos += len;
@@ -304,9 +391,9 @@ fn parse_ack_frame(buf: &[u8], pos_in: usize) -> Result<usize, Parse_error> {
         return Err(Parse_error::new(
             Invalid_TLS_Packet,
             "Invalid range count: exceeds remaining buffer capacity",
-        ));
+        ).into());
     }
-    for _ in 0..range_count as usize {
+    for _ in 0..usize::try_from(range_count)? {
         // Gap
         pos +=
             skip_varint(buf, pos).ok_or_else(|| Parse_error::new(Invalid_TLS_Packet, "ACK Gap"))?;
@@ -326,13 +413,13 @@ fn process_quic_handshake_data(
         packet_info.tls_client.done = true;
         let client_data = packet_info.tls_client.data.clone();
         if !client_data.is_empty() {
-            crate::ssl_packet::parse_tls_handshake(&client_data, packet_info, statistics)?;
+            parse_tls_handshake(&client_data, packet_info, statistics)?;
         }
     } else {
         packet_info.tls_server.done = true;
         let server_data = packet_info.tls_server.data.clone();
         if !server_data.is_empty() {
-            crate::ssl_packet::parse_tls_handshake(&server_data, packet_info, statistics)?;
+            parse_tls_handshake(&server_data, packet_info, statistics)?;
         }
     }
     Ok(())
@@ -351,7 +438,7 @@ fn ssl_read_packet_number(packet: &[u8], offset: usize, pn_len: usize) -> Result
     }
 }
 
-const MAX_HANDSHAKE_SIZE: u64 = 30000;
+const MAX_HANDSHAKE_SIZE: u64 = (32*1024) + 10;
 
 fn parse_crypto_frame(
     packet_payload: &[u8],
@@ -369,7 +456,7 @@ fn parse_crypto_frame(
     //debug!("QUIC frame type: {frame_type:x} offset {offset} len: {length} ");
     let crypto_data = ssl_parse_slice(
         packet_payload,
-        crypto_offset..crypto_offset + length as usize,
+        crypto_offset..crypto_offset + usize::try_from(length)?,
     )?;
     /*debug!(
         "QUIC frame type: {frame_type:x} offset {offset} len: {length} data {:x?}",
@@ -391,12 +478,13 @@ fn parse_crypto_frame(
         )
         .into());
     }
-    if store_data.len() < (total_required as usize) {
-        store_data.resize(total_required as usize, 0);
+    let required = usize::try_from(total_required)?;
+    if store_data.len() < required {
+        store_data.resize(required, 0);
     }
-    store_data[offset as usize..total_required as usize].copy_from_slice(crypto_data);
+    store_data[usize::try_from(offset)?..required].copy_from_slice(crypto_data);
 
-    Ok((crypto_offset + length as usize) - start_offset)
+    Ok((crypto_offset + usize::try_from(length)?) - start_offset)
 }
 
 pub(crate) fn parse_quic(
@@ -409,9 +497,9 @@ pub(crate) fn parse_quic(
     sp: u16,
     dp: u16,
     statistics: &mut Statistics,
-    transport_protocol: Transport_Protocol
+    transport_protocol: Transport_Protocol,
 ) -> Result<(), Box<dyn Error>> {
-    let is_client = config.ports.contains(&dp);
+    let is_client = config.quic_ports.contains(&dp);
     let mut offset = 0;
     let flag = ssl_read_u8(packet, offset)?;
     let packet_key = if is_client {
@@ -430,10 +518,10 @@ pub(crate) fn parse_quic(
                 packet_key.0,
                 packet_key.1,
                 TLS_Protocol::QUIC,
-                transport_protocol
+                transport_protocol,
             )
         });
-    if flag & 0x3 == 0 || flag & 0x80 != 0x80 {
+    if flag & 0x80 != 0x80 {
         // not an i=itial packet or not a long header
         return Ok(());
     }
@@ -474,7 +562,7 @@ pub(crate) fn parse_quic(
         )
         .into());
     }
-  //  let _s_conn_id = ssl_parse_slice(packet, offset + 1..offset + 1 + s_conn_id_len as usize)?;
+    //  let _s_conn_id = ssl_parse_slice(packet, offset + 1..offset + 1 + s_conn_id_len as usize)?;
     offset += 1 + s_conn_id_len as usize;
     /*debug!(
         "QUIC d_conn_id {:x} {:x?}, {:x }{:x?} {}",
@@ -488,14 +576,14 @@ pub(crate) fn parse_quic(
     } else if !is_client && packet_info.initial_server_secret.is_empty() {
         return Err(Parse_error::new(Invalid_TLS_Packet, "Missed initial d_conn_id ").into());
     }
-    let secret = if !is_client {
-        &packet_info.initial_server_secret
-    } else {
+    let secret = if is_client {
         &packet_info.initial_client_secret
+    } else {
+        &packet_info.initial_server_secret
     };
     let p_key = derive_packet_keys(secret)?;
     let (token_len, len) = parse_varint(packet, offset)?;
-    offset += len + token_len as usize;
+    offset += len + usize::try_from(token_len)?;
     let (len, size) = parse_varint(packet, offset)?;
     offset += size;
     let pn_len = remove_header_protection(packet, offset, &p_key.hp)?;
@@ -519,36 +607,56 @@ pub(crate) fn parse_quic(
         &p_key.iv,
         u64::from(packet_number),
         &mut payload_slice,
-        &aad_slice
+        aad_slice,
     )?;
-    //debug!("QUIC packet len {} ", payload_size);
+
     let mut crypto_offset = 0;
     while crypto_offset < payload_size {
-        let (frame_type, len) = parse_varint(&payload_slice, crypto_offset)?;
+        let (frame_type_raw, len) = parse_varint(&payload_slice, crypto_offset)?;
         if len == 0 {
             break;
         }
         crypto_offset += len;
 
-        if frame_type == 0x06 {
-            crypto_offset += parse_crypto_frame(
-                &payload_slice,
-                crypto_offset,
-                is_client,
-                packet_info,
-                frame_type,
-            )?;
-        } else if frame_type == 0x02 {
-            crypto_offset += parse_ack_frame(&payload_slice, crypto_offset)?;
-            // ACK
-        } else if frame_type == 0x00 {
-            crypto_offset = payload_slice.len();
-            // PADDING
-        } else {
-            break;
+        let Some(frame_type) = QuicFrameType::from_u64(frame_type_raw) else {
+            break; // unknown/unhandled frame type
+        };
+
+        match frame_type {
+            QuicFrameType::Crypto => {
+                crypto_offset += parse_crypto_frame(
+                    &payload_slice,
+                    crypto_offset,
+                    is_client,
+                    packet_info,
+                    frame_type_raw, // keep passing the original numeric value
+                )?;
+            }
+            QuicFrameType::Ack => {
+                crypto_offset += parse_ack_frame(&payload_slice, crypto_offset)?;
+            }
+            QuicFrameType::Padding => {
+                while crypto_offset < payload_size && payload_slice[crypto_offset] == 0x00 {
+                    crypto_offset += 1;
+                }
+            }
+            QuicFrameType::Ping => {
+                // ping - skip 0 bytes
+            }
+            QuicFrameType::NewToken => {
+                let (token_len, len) = parse_varint(&payload_slice, crypto_offset)?;
+                crypto_offset += len;
+                let token_len_usize = usize::try_from(token_len)?;
+                crypto_offset += token_len_usize;
+            }
+            QuicFrameType::ConnectionCloseTransport | QuicFrameType::ConnectionCloseApplication => {
+                break;
+            }
+            _ => {
+                break;
+            }
         }
     }
-    // not interested in short headers, handshakes have long headers
 
     Ok(())
 }

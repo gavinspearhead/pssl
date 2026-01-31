@@ -1,11 +1,11 @@
 use serde::ser::SerializeMap;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering::Equal;
 use std::fmt::Debug;
 use std::{collections::HashMap, fmt};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Rank<T>
+pub struct Rank<T>
 where
     T: Eq + std::hash::Hash + fmt::Display + serde::Serialize + Clone + Debug,
 {
@@ -29,36 +29,83 @@ impl<T> Rank<T>
 where
     T: Eq + std::hash::Hash + fmt::Display + serde::Serialize + Clone + Debug,
 {
+    #[must_use]
     pub fn new(size_in: usize) -> Rank<T> {
         Rank {
             size: size_in,
             rank: HashMap::with_capacity(size_in),
         }
     }
+    pub fn set_size(&mut self, size_in: usize) {
+        self.size = size_in;
+        self.reduce();
+    }
 
-    pub fn remove_lowest(&mut self) -> u128 {
-        let mut min_key = None;
-        let mut min_val: u128 = 0;
-        let mut max_val: u128 = 0;
+    pub fn reduce(&mut self) {
+        let n = self.rank.len();
+        let k = self.size;
 
-        for (k, v) in &self.rank {
-            if min_val == 0 || *v < min_val {
-                min_val = *v;
-                min_key = Some(k);
+        if n <= k {
+            return;
+        }
+        if k == 0 {
+            self.rank.clear();
+            return;
+        }
+
+        // We need to remove the lowest `n - k` items.
+        let remove_count = n - k;
+
+        // Find the cutoff value `t` such that at least `remove_count` items have value <= t.
+        // We do this by selecting the `remove_count - 1`-th element in ascending order.
+        let mut values: Vec<u128> = self.rank.values().copied().collect();
+        let (_, cutoff, _) = values.select_nth_unstable(remove_count - 1);
+        let t = *cutoff;
+
+        // Remove everything strictly below the cutoff.
+        let to_remove: Vec<T> = self
+            .rank
+            .iter()
+            .filter_map(|(key, &val)| (val < t).then(|| key.clone()))
+            .collect();
+        for key in &to_remove {
+            self.rank.remove(key);
+        }
+
+        // If ties at the cutoff remain and we're still above size, remove some `== t` entries.
+        // (Arbitrary choice among ties; keeps correctness: final len == self.size.)
+        let mut remaining = self.rank.len().saturating_sub(k);
+        if remaining > 0 {
+            let mut cutoff_keys: Vec<T> = self
+                .rank
+                .iter()
+                .filter_map(|(key, &val)| (val == t).then(|| key.clone()))
+                .collect();
+
+            if cutoff_keys.len() > remaining {
+                cutoff_keys.truncate(remaining);
             }
-            if *v > max_val {
-                max_val = *v;
+            for key in cutoff_keys {
+                self.rank.remove(&key);
+                remaining -= 1;
+                if remaining == 0 {
+                    break;
+                }
             }
         }
-        if let Some(k) = min_key {
-            //debug!("Remove k={} minv={} maxv={}", k, min_val, max_val);
-            self.rank.remove(&k.clone());
-            min_val.saturating_mul(2).saturating_add(max_val) / 3
+    }
+
+    pub fn remove_lowest(&mut self) -> u128 {
+        let min_entry = self.rank.iter().min_by_key(|&(_, v)| v);
+
+        if let Some((k, &v)) = min_entry {
+            let key_to_remove = k.clone();
+            self.rank.remove(&key_to_remove);
+            v
         } else {
             0
         }
     }
-
     pub fn add(&mut self, element: &T) {
         if let Some(elem) = self.rank.get_mut(element) {
             *elem += 1;
@@ -66,7 +113,7 @@ where
         } else {
             // debug!("{:?}: 0", element);
             let val = if self.rank.len() >= self.size {
-                self.remove_lowest().max(1)
+                self.remove_lowest() + 1
             } else {
                 1
             };
@@ -108,5 +155,30 @@ where
             map.serialize_entry(key, value)?;
         }
         map.end()
+    }
+}
+
+impl<'de, T> Deserialize<'de> for Rank<T>
+where
+    T: Eq
+        + std::hash::Hash
+        + fmt::Display
+        + serde::Serialize
+        + serde::Deserialize<'de>
+        + Clone
+        + Debug,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Matches `Serialize` which emits a JSON object/map: { key: value, ... }
+        let rank = HashMap::<T, u128>::deserialize(deserializer)?;
+
+        // We can't recover the original `size` from the serialized form (it isn't written),
+        // so we pick a sensible default consistent with the data we got.
+        let size = rank.len();
+
+        Ok(Self { size, rank })
     }
 }

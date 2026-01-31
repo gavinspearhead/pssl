@@ -5,7 +5,8 @@ use sha2::{Digest, Sha256};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::ops::RangeBounds;
 
-pub(crate) fn ssl_parse_slice<T>(packet: &[u8], range: T) -> Result<& [u8], Parse_error>
+#[inline]
+fn calculate_range<T>(len: usize, range: T) -> (usize, usize)
 where
     T: RangeBounds<usize>,
 {
@@ -14,41 +15,39 @@ where
         std::ops::Bound::Excluded(&s) => s + 1,
         std::ops::Bound::Unbounded => 0,
     };
-
     let end = match range.end_bound() {
         std::ops::Bound::Included(&e) => e + 1,
         std::ops::Bound::Excluded(&e) => e,
-        std::ops::Bound::Unbounded => packet.len(),
+        std::ops::Bound::Unbounded => len,
     };
+    (start, end)
+}
+
+pub(crate) fn ssl_parse_slice<T>(packet: &[u8], range: T) -> Result<&[u8], Parse_error>
+where
+    T: RangeBounds<usize>,
+{
+    let (start, end) = calculate_range(packet.len(), range);
 
     if start <= end && end <= packet.len() {
         Ok(&packet[start..end])
     } else {
-        Err(Parse_error::new(Invalid_packet_index, " {start}..{end}"))
+        Err(Parse_error::new(Invalid_packet_index, &format!(" {start}..{end}").to_string()))
     }
 }
-pub(crate) fn ssl_parse_slice_mut <T>(packet: &mut [u8], range: T) -> Result<&mut [u8], Parse_error>
+pub(crate) fn ssl_parse_slice_mut<T>(packet: &mut [u8], range: T) -> Result<&mut [u8], Parse_error>
 where
     T: RangeBounds<usize>,
 {
-    let start = match range.start_bound() {
-        std::ops::Bound::Included(&s) => s,
-        std::ops::Bound::Excluded(&s) => s + 1,
-        std::ops::Bound::Unbounded => 0,
-    };
-
-    let end = match range.end_bound() {
-        std::ops::Bound::Included(&e) => e + 1,
-        std::ops::Bound::Excluded(&e) => e,
-        std::ops::Bound::Unbounded => packet.len(),
-    };
+    let (start, end) = calculate_range(packet.len(), range);
 
     if start <= end && end <= packet.len() {
         Ok(&mut packet[start..end])
     } else {
-        Err(Parse_error::new(Invalid_packet_index, " {start}..{end}"))
+        Err(Parse_error::new(Invalid_packet_index, &format!(" {start}..{end}").to_string()))
     }
 }
+
 pub(crate) fn parse_ssl_str(rdata: &[u8]) -> Result<String, Parse_error> {
     if let Ok(x) = std::str::from_utf8(rdata) {
         Ok(x.to_owned())
@@ -62,6 +61,14 @@ pub(crate) fn ssl_read_u64(packet: &[u8], offset: usize) -> Result<u64, Parse_er
         return Err(Parse_error::new(Invalid_packet_index, &offset.to_string()));
     };
     let val = BigEndian::read_u64(r);
+    Ok(val)
+}
+
+pub(crate) fn ssl_read_u48(packet: &[u8], offset: usize) -> Result<u64, Parse_error> {
+    let Some(r) = packet.get(offset..offset + 6) else {
+        return Err(Parse_error::new(Invalid_packet_index, &offset.to_string()));
+    };
+    let val = BigEndian::read_u48(r);
     Ok(val)
 }
 
@@ -250,7 +257,7 @@ pub fn join_u8(list: &[u8]) -> String {
         .join("-")
 }
 /// Helper: compute SHA-256 of a string, then take the first 12 hex characters (for example)
-#[must_use] 
+#[must_use]
 pub fn truncated_hash_hex(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
@@ -260,16 +267,13 @@ pub fn truncated_hash_hex(input: &str) -> String {
 }
 
 #[inline]
-#[must_use] 
+#[must_use]
 pub fn filter_grease(list: &[u16]) -> Vec<u16> {
-    list.iter()
-        .filter(|&&v| !is_grease(v))
-        .copied()
-        .collect()
+    list.iter().filter(|&&v| !is_grease(v)).copied().collect()
 }
 
 #[inline]
-#[must_use] 
+#[must_use]
 pub fn is_grease(v: u16) -> bool {
     (v & 0x0F0F) == 0x0A0A
 }

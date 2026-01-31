@@ -1,12 +1,14 @@
 use crate::ssl_helper::{filter_grease, is_grease, join_u16, join_u8, truncated_hash_hex};
 use crate::TLS_Protocol;
-use tracing::debug;
+use std::fmt::Write;
 
 fn first_and_last(s: &str) -> String {
     let mut chars = s.chars();
 
     // Get the first character
-    let Some(first) = chars.next() else { return String::new() };
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
 
     // Get the last character (if it exists)
     match chars.next_back() {
@@ -48,8 +50,74 @@ mod tests {
         assert_eq!(first_and_last("🚀rust🦀"), "🚀🦀");
     }
 }
+/// Check if a byte is ASCII alphanumeric per JA4 rules
+#[inline]
+fn is_ascii_alnum(b: u8) -> bool {
+    matches!(b,
+        b'0'..=b'9' |
+        b'A'..=b'Z' |
+        b'a'..=b'z'
+    )
+}
 
-#[must_use] 
+/// Normalize the first ALPN identifier into a JA4 2-character token
+///
+/// Input: raw ALPN string
+/// Output: String with 2 chars,
+#[must_use]
+pub fn ja4_normalize_alpn(alpn: &[u8]) -> String {
+    // Must have at least:
+    // - 2 bytes ProtocolNameList length
+    // - 1 byte ProtocolName length
+    if alpn.is_empty() {
+        return "00".into();
+    }
+    let first = *alpn.first().unwrap_or(&b'0');
+    let last = *alpn.last().unwrap_or(&b'0');
+
+    let out = if is_ascii_alnum(first) && is_ascii_alnum(last) {
+        // ASCII fast path
+        let mut s = String::with_capacity(2);
+        s.push(first as char);
+        s.push(last as char);
+        s
+    } else {
+        let to_hex = |b: u8| -> char {
+            match b {
+                0..=9 => (b + b'0') as char,
+                _ => (b - 10 + b'a') as char,
+            }
+        };
+        let mut s = String::with_capacity(2);
+        s.push(to_hex(first >> 4)); // High nibble of first
+        s.push(to_hex(last & 0x0F)); // Low nibble of last
+        s
+    };
+
+    out
+}
+
+#[cfg(test)]
+mod tests_alpns {
+    use super::*;
+
+    #[test]
+    fn test_ja4_normalize_alpn() {
+        assert_eq!(ja4_normalize_alpn(&[0xAB]), ("ab"));
+        assert_eq!(ja4_normalize_alpn(&[0xAB, 0xCD]), ("ad"));
+        assert_eq!(ja4_normalize_alpn(&[0x30, 0xAB]), ("3b"));
+        assert_eq!(ja4_normalize_alpn(&[0x30, 0x31, 0xAB, 0xCD]), ("3d"));
+        assert_eq!(ja4_normalize_alpn(&[0x30, 0xAB, 0xCD, 0x31]), ("01"));
+        assert_eq!(ja4_normalize_alpn(&[b'h', b'2']), ("h2"));
+        assert_eq!(ja4_normalize_alpn(&[b'h', b'.', b'2']), ("h2"));
+        assert_eq!(ja4_normalize_alpn(&[]), ("00"));
+        assert_eq!(
+            ja4_normalize_alpn(&[0x68, 0x74, 0x74, 0x70, 0x2f, 0x31, 0x2e, 0x31]),
+            ("h1")
+        );
+    }
+}
+#[must_use]
 pub fn compute_ja4_client_fingerprint(
     protocol: TLS_Protocol,
     ciphers: &[u16],
@@ -85,23 +153,18 @@ pub fn compute_ja4_client_fingerprint(
     } else {
         ja4_string.push('i');
     }
-    let mut filtered_ciphers: Vec<u16> = ciphers.iter().filter(|&&v| !is_grease(v)).copied().collect();
+    let mut filtered_ciphers: Vec<u16> = ciphers
+        .iter()
+        .filter(|&&v| !is_grease(v))
+        .copied()
+        .collect();
     let mut filtered_exts: Vec<u16> = exts.iter().filter(|&&v| !is_grease(v)).copied().collect();
+    let _ = write!(ja4_string, "{:02}", filtered_ciphers.len().min(99));
+    let _ = write!(ja4_string, "{:02}", filtered_exts.len().min(99));
 
-
-    ja4_string.push_str(&format!("{:02}", filtered_ciphers.len().min(99)));
-    ja4_string.push_str(&format!("{:02}", filtered_exts.len().min(99)));
-    if alpn.is_empty() {
-        ja4_string.push_str("00");
-    } else {
-        let alpn_val = first_and_last(&alpn[0]);
-        if alpn_val.is_empty() {
-            ja4_string.push_str("00");
-        } else {
-            ja4_string.push_str(&alpn_val);
-        }
-    }
-
+    ja4_string.push_str(&ja4_normalize_alpn(
+        alpn.first().unwrap_or(&String::new()).as_bytes(),
+    ));
     filtered_ciphers.sort_unstable();
     filtered_exts.sort_unstable();
     let sigs = sig_list.to_vec();
@@ -116,7 +179,7 @@ pub fn compute_ja4_client_fingerprint(
     let ext_list_str = filtered_exts
         .iter()
         // ignore SNI  and ALPN
-        .filter(|v| **v != 0 && **v != 0x0010 )
+        .filter(|v| **v != 0 && **v != 0x0010)
         .map(|v| format!("{v:04x}"))
         .collect::<Vec<_>>()
         .join(",");
@@ -137,7 +200,7 @@ pub fn compute_ja4_client_fingerprint(
     ja4_string
 }
 
-#[must_use] 
+#[must_use]
 pub fn compute_ja4_server_fingerprint(
     protocol: TLS_Protocol,
     cipher: u16,
@@ -167,19 +230,19 @@ pub fn compute_ja4_server_fingerprint(
         _ => ja4_string.push_str("00"),
     }
     let mut filtered_exts: Vec<u16> = exts.iter().filter(|&&v| !is_grease(v)).copied().collect();
-    ja4_string.push_str(&format!("{:02}", filtered_exts.len().min(99)));
-    ja4_string.push_str(&format!(
-        "{:2}",
+    let _ = write!(ja4_string, "{:02}", filtered_exts.len().min(99));
+    let _ = write!(
+        ja4_string,
+        "{:02}",
         first_and_last(if alpn.is_empty() { "00" } else { alpn })
-    ));
-
-    ja4_string.push_str(&format!("_{cipher:04x}"));
+    );
+    let _ = write!(ja4_string, "_{cipher:04x}");
     //debug!( "JA4S -- {} {} {} {:x}", ja4_string, version, exts.len(), cipher );
     filtered_exts.sort_unstable();
 
     let ext_list_str = filtered_exts
         .iter()
-        .filter(|v| **v != 0 && **v != 0x0010 )
+        .filter(|v| **v != 0 && **v != 0x0010)
         .map(|v| format!("{v:04x}"))
         .collect::<Vec<_>>()
         .join(",");
@@ -192,7 +255,7 @@ pub fn compute_ja4_server_fingerprint(
     ja4_string
 }
 
-#[must_use] 
+#[must_use]
 pub fn compute_ja3_client_fingerprint(
     client_hello_version: u16,
     cipher_list: &[u16],
@@ -212,7 +275,7 @@ pub fn compute_ja3_client_fingerprint(
     format!("{:x}", md5::compute(ja3_string.as_bytes()))
 }
 
-#[must_use] 
+#[must_use]
 pub fn compute_ja3_server_fingerprint(
     server_hello_version: u16,
     cipher: u16,

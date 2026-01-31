@@ -1,9 +1,9 @@
-use std::borrow::Cow;
-use serde::{Deserialize, Serialize};
-use std::fmt::Display;
-use strum_macros::{EnumIter, EnumString, FromRepr, IntoStaticStr};
 use crate::ssl_helper::is_grease;
+use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+use std::fmt::Display;
 use std::str::FromStr;
+use strum_macros::{EnumIter, EnumString, FromRepr, IntoStaticStr};
 
 #[derive(
     EnumIter,
@@ -387,38 +387,37 @@ pub enum TlsCipherSuiteValue {
 pub enum TlsCipherSuite {
     Known(TlsCipherSuiteValue),
     Unknown(u16),
-    Grease
+    Grease,
 }
 
-
 impl TlsCipherSuite {
-    #[must_use] 
-    pub fn from_u16(id: u16) -> Option<Self> {
+    #[must_use]
+    pub fn from_u16(id: u16) -> Self {
         if is_grease(id) {
-            Some(TlsCipherSuite::Grease)
+            TlsCipherSuite::Grease
         } else {
             match TlsCipherSuiteValue::from_repr(id) {
-                Some(known) => Some(TlsCipherSuite::Known(known)),
-                None => Some(TlsCipherSuite::Unknown(id)),
+                Some(known) => TlsCipherSuite::Known(known),
+                None => TlsCipherSuite::Unknown(id),
             }
         }
     }
-    #[must_use] 
+    #[must_use]
     pub fn to_u16(&self) -> u16 {
         match self {
             TlsCipherSuite::Known(known) => *known as u16,
             TlsCipherSuite::Unknown(unknown) => *unknown,
             TlsCipherSuite::Grease => 0x0a0a,
         }
-
     }
-    #[must_use] 
+    #[must_use]
     pub fn as_str(&self) -> String {
         match self {
             TlsCipherSuite::Known(known) => Cow::Borrowed(known.into()),
             TlsCipherSuite::Unknown(val) => Cow::Owned(format!("Unknown ({val:x})")),
             TlsCipherSuite::Grease => Cow::Borrowed("Grease"),
-        }.into_owned()
+        }
+        .into_owned()
     }
 }
 
@@ -427,7 +426,6 @@ impl Display for TlsCipherSuite {
         write!(f, "{}", self.as_str())
     }
 }
-
 
 impl Default for TlsCipherSuite {
     fn default() -> Self {
@@ -449,31 +447,31 @@ impl Serialize for TlsCipherSuite {
     }
 }
 
- impl<'de> Deserialize<'de> for TlsCipherSuite {
-        fn deserialize<D>(deserializer: D) -> Result<TlsCipherSuite, D::Error>
-        where
-            D: serde::Deserializer<'de>,
-        {
-            let s = String::deserialize(deserializer)?;
+impl<'de> Deserialize<'de> for TlsCipherSuite {
+    fn deserialize<D>(deserializer: D) -> Result<TlsCipherSuite, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
 
-            if s == "Grease" {
-                return Ok(TlsCipherSuite::Grease);
-            }
+        if s == "Grease" {
+            return Ok(TlsCipherSuite::Grease);
+        }
 
-            if let Some(caps) = s.strip_prefix("Unknown (") {
-                if let Some(hex_val) = caps.strip_suffix(')') {
-                    if let Ok(id) = u16::from_str_radix(hex_val, 16) {
-                        return Ok(TlsCipherSuite::Unknown(id));
-                    }
+        if let Some(caps) = s.strip_prefix("Unknown (") {
+            if let Some(hex_val) = caps.strip_suffix(')') {
+                if let Ok(id) = u16::from_str_radix(hex_val, 16) {
+                    return Ok(TlsCipherSuite::Unknown(id));
                 }
             }
+        }
 
-            // Attempt to parse the name back to TlsCipherSuiteValue using strum
-            match TlsCipherSuiteValue::from_str(&s) {
-                Ok(known) => Ok(TlsCipherSuite::Known(known)),
-                Err(_) => Err(serde::de::Error::custom(format!(
-                    "Invalid TLS Cipher Suite string: {s}" 
-                ))),
-            }
+        // Attempt to parse the name back to TlsCipherSuiteValue using strum
+        match TlsCipherSuiteValue::from_str(&s) {
+            Ok(known) => Ok(TlsCipherSuite::Known(known)),
+            Err(_) => Err(serde::de::Error::custom(format!(
+                "Invalid TLS Cipher Suite string: {s}"
+            ))),
         }
     }
+}

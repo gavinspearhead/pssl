@@ -47,7 +47,7 @@ impl Mysql_connection {
                 LAST_SEEN = GREATEST(LAST_SEEN, FROM_UNIXTIME(?)),
                 FIRST_SEEN = LEAST(FROM_UNIXTIME(?), FIRST_SEEN)
                 ";
-       /* debug!(
+        /* debug!(
             "{} {} {} {} {}",
             i.d_addr.to_string(),
             i.dp,
@@ -63,7 +63,7 @@ impl Mysql_connection {
                 .bind(&i.tls_client.sni)
                 .bind(i.tls_server.version)
                 .bind(i.tls_server.cipher.as_str())
-                .bind(i.tls_server.group.as_str())
+                .bind(i.tls_server.curve.as_str())
                 .bind(ts)
                 .bind(ts)
                 .bind(&i.tls_server.ja4s)
@@ -110,8 +110,8 @@ impl Mysql_connection {
                 .execute(&self.pool),
         );
         match q_res {
-            Ok(x) => {
-               // debug!("Success PSSL_Client {:?}", x);
+            Ok(_x) => {
+                // debug!("Success PSSL_Client {:?}", x);
             }
             Err(e) => {
                 error!("Error: {}", e);
@@ -131,12 +131,12 @@ impl Mysql_connection {
   `count` bigint(20) DEFAULT NULL,
 
   PRIMARY KEY (`id`),
-  UNIQUE KEY `dups1` (`ip`,`version`, `ja4s`, `protocol`)
+  UNIQUE KEY `dups1` (`ip`,`version`, `ja4c`, `protocol`)
 ) ENGINE=MyISAM DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci;
         ";
         match block_on(sqlx::query(create_cmd1).execute(&self.pool)) {
-            Ok(x) => {
-               // debug!("Success {:?}", x);
+            Ok(_x) => {
+                // debug!("Success {:?}", x);
             }
             Err(e) => {
                 error!("Error: {}", e);
@@ -163,13 +163,13 @@ impl Mysql_connection {
   `domain` varchar(256) DEFAULT NULL,
   `prefix` varchar(256) DEFAULT NULL,
   PRIMARY KEY (`id`),
-  UNIQUE KEY `dups1` (`ip`,`port`,`host`,`version`,`cipher`, `curve`, `ja4s`, `protocol`))
+  UNIQUE KEY `dups1` (`ip`,`port`,`host`,`version`,`cipher`, `curve`, `ja4s`, `protocol`)
 ) ENGINE=MyISAM DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci;
 
       ";
         match block_on(sqlx::query(create_cmd2).execute(&self.pool)) {
-            Ok(x) => {
-               // debug!("Success {:?}", x);
+            Ok(_x) => {
+                // debug!("Success {:?}", x);
             }
             Err(e) => {
                 error!("Error: {}", e);

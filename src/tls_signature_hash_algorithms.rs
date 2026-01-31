@@ -130,52 +130,53 @@ impl Serialize for TlsSignatureScheme {
         value.serialize(serializer)
     }
 }
- impl<'de> Deserialize<'de> for TlsSignatureScheme {
-        fn deserialize<D>(deserializer: D) -> Result<TlsSignatureScheme, D::Error>
-        where
-            D: serde::Deserializer<'de>,
-        {
-            let s = String::deserialize(deserializer)?;
-            if s == "Grease" {
-                return Ok(TlsSignatureScheme::Grease);
-            }
-
-            if let Ok(known) = s.parse::<TlsSignatureSchemeValue>() {
-                return Ok(TlsSignatureScheme::Known(known));
-            }
-
-            if s.starts_with("Unknown (") && s.ends_with(')') {
-                let hex_part = &s[9..s.len() - 1];
-                debug!("{hex_part}");
-                if let Ok(id) = u16::from_str_radix(hex_part, 16) {
-                    return Ok(TlsSignatureScheme::Unknown(id));
-                }
-            }
-
-            Ok(TlsSignatureScheme::Unknown(0))
+impl<'de> Deserialize<'de> for TlsSignatureScheme {
+    fn deserialize<D>(deserializer: D) -> Result<TlsSignatureScheme, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        if s == "Grease" {
+            return Ok(TlsSignatureScheme::Grease);
         }
+
+        if let Ok(known) = s.parse::<TlsSignatureSchemeValue>() {
+            return Ok(TlsSignatureScheme::Known(known));
+        }
+
+        if s.starts_with("Unknown (") && s.ends_with(')') {
+            let hex_part = &s[9..s.len() - 1];
+            debug!("{hex_part}");
+            if let Ok(id) = u16::from_str_radix(hex_part, 16) {
+                return Ok(TlsSignatureScheme::Unknown(id));
+            }
+        }
+
+        Ok(TlsSignatureScheme::Unknown(0))
     }
+}
 
 impl Default for TlsSignatureScheme {
+    #[inline]
     fn default() -> Self {
         TlsSignatureScheme::Known(TlsSignatureSchemeValue::Unknown)
     }
 }
 
 impl TlsSignatureScheme {
-    #[must_use] 
-    pub fn from_u16(id: u16) -> Option<Self> {
+    #[must_use]
+    pub fn from_u16(id: u16) -> Self {
         if is_grease(id) {
-            Some(TlsSignatureScheme::Grease)
+            TlsSignatureScheme::Grease
         } else {
             match TlsSignatureSchemeValue::from_repr(id) {
-                Some(known) => Some(TlsSignatureScheme::Known(known)),
-                None => Some(TlsSignatureScheme::Unknown(id)),
+                Some(known) => TlsSignatureScheme::Known(known),
+                None => TlsSignatureScheme::Unknown(id),
             }
         }
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn to_u16(self) -> u16 {
         match self {
             TlsSignatureScheme::Known(known) => known as u16,
@@ -184,7 +185,7 @@ impl TlsSignatureScheme {
         }
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn as_str(self) -> String {
         match self {
             TlsSignatureScheme::Known(known) => Cow::Borrowed(known.into()),

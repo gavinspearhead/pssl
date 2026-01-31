@@ -2,9 +2,10 @@ use chrono::{DateTime, Utc};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
+pub(crate) type QueuedPacket = Option<(Vec<u8>, DateTime<Utc>)>;
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Packet_Queue {
-    queue: Arc<Mutex<VecDeque<Option<(Vec<u8>, DateTime<Utc>)>>>>,
+    queue: Arc<Mutex<VecDeque<QueuedPacket>>>,
 }
 
 impl Packet_Queue {
@@ -18,14 +19,14 @@ impl Packet_Queue {
         }
     }
     #[inline]
-    pub fn push_back(&self, packet: Option<(Vec<u8>, DateTime<Utc>)>) {
+    pub fn push_back(&self, packet: QueuedPacket) {
         let mut queue = self.queue.lock().unwrap();
         if queue.len() < Self::MAX_QUEUE_SIZE {
             queue.push_back(packet);
         }
     }
     #[inline]
-    pub fn pop_front(&self) -> Option<Option<(Vec<u8>, DateTime<Utc>)>> {
+    pub fn pop_front(&self) -> Option<QueuedPacket> {
         self.queue.lock().unwrap().pop_front()
     }
 }

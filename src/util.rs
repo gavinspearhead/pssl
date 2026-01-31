@@ -48,7 +48,7 @@ pub(crate) fn load_asn_database(config: &Config) -> asn_db2::Database {
 pub(crate) fn find_domain(publicsuffixlist: &publicsuffix::List, name: &str) -> String {
     let domain = publicsuffixlist.domain(name.as_bytes());
     if let Some(d) = domain {
-        let x = d.as_bytes().to_vec();
+        let x = d.as_bytes().to_owned();
         String::from_utf8(x).unwrap_or_default()
     } else {
         //debug!("Domain not found: {name}");
